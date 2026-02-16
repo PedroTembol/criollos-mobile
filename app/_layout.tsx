@@ -3,10 +3,12 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import 'react-native-reanimated';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { useColorScheme } from '@/components/useColorScheme';
+import { TransportSettingsProvider } from '@/components/transportSettings';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -38,11 +40,29 @@ export default function RootLayout() {
     }
   }, [loaded]);
 
+  const queryClient = useMemo(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: 1,
+          },
+        },
+      }),
+    [],
+  );
+
   if (!loaded) {
     return null;
   }
 
-  return <RootLayoutNav />;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TransportSettingsProvider>
+        <RootLayoutNav />
+      </TransportSettingsProvider>
+    </QueryClientProvider>
+  );
 }
 
 function RootLayoutNav() {
