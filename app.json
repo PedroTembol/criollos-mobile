@@ -2,7 +2,7 @@
   "expo": {
     "name": "Criollos",
     "slug": "criollos",
-    "version": "1.0.0",
+    "version": "1.1.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "criollos",
@@ -16,6 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.pedroanibarro.criollos.app",
+      "buildNumber": "27",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }

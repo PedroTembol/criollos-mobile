@@ -6,7 +6,7 @@ import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 
-// You can explore the built-in icon families and icons on the web at https://icons.expo.fyi/
+// You can explore the built-in icon families and icons on the web at https://icons.fyi/
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
   color: string;
@@ -30,6 +30,27 @@ export default function TabLayout() {
         options={{
           title: 'Transporte',
           tabBarIcon: ({ color }) => <TabBarIcon name="bus" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="descubrir"
+        options={{
+          title: 'Descubrir',
+          tabBarIcon: ({ color }) => <TabBarIcon name="compass" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="eventos"
+        options={{
+          title: 'Eventos',
+          tabBarIcon: ({ color }) => <TabBarIcon name="calendar" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="gastronomia"
+        options={{
+          title: 'Gastronomía',
+          tabBarIcon: ({ color }) => <TabBarIcon name="cutlery" color={color} />,
         }}
       />
       <Tabs.Screen

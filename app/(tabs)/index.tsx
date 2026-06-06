@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,14 +10,28 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import FontAwesome from '@expo/vector-icons/FontAwesome';
 
 import { useFavorites } from '@/components/transportFavorites';
 import { formatDistance, sortByDistance, type LatLng } from '@/components/transportGeo';
-import { useBootstrapQuery, useEtaQuery, usePositionsQuery, useRoutesQuery, useStopsQuery } from '@/components/transportQueries';
+import {
+  useBootstrapQuery,
+  useEtaQuery,
+  useNearbyStopsQuery,
+  usePositionsQuery,
+  useRoutesQuery,
+  useStopsQuery,
+  useTrackingQuery,
+  useDiscoveryQuery,
+} from '@/components/transportQueries';
 import { planRoute, type RoutePlan } from '@/components/transportPlanner';
 import type { Marker as ApiMarker, Position, RoutePoint } from '@/components/transportTypes';
+import { TrackingDashboard } from '@/components/TrackingDashboard';
+import { NearbyStopsPanel } from '@/components/NearbyStopsPanel';
+import { SearchOverlay } from '@/components/SearchOverlay';
+import type { SearchResult } from '@/components/transportTypes';
 
 type ViewMode = 'mapa' | 'lista' | 'planner';
 
@@ -28,26 +43,127 @@ type LocationChoice = {
   type: 'stop' | 'marker';
 };
 
+type EtaLine = {
+  label: string;
+  value: string;
+};
+
 const CAGUAS_CENTER = { latitude: 18.2341, longitude: -66.0485 };
+const isWeb = Platform.OS === 'web';
+const mapsModule = isWeb ? null : require('react-native-maps');
+const MapView = mapsModule?.default as any;
+const Marker = mapsModule?.Marker as any;
+const Polyline = mapsModule?.Polyline as any;
+
+function humanizeKey(input: string) {
+  return input
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+}
+
+function formatEtaValue(value: unknown): string {
+  if (value == null) return 'N/D';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return 'N/D';
+    if (value >= 60 && value % 60 === 0) {
+      return `${Math.round(value / 60)} min`;
+    }
+    if (value > 0 && value < 60) {
+      return `${Math.round(value)} s`;
+    }
+    return String(Math.round(value * 100) / 100);
+  }
+  if (typeof value === 'boolean') return value ? 'Sí' : 'No';
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return 'N/D';
+    const isoDate = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed);
+    if (isoDate) {
+      const parsed = new Date(trimmed);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toLocaleString('es-PR', {
+          hour: 'numeric',
+          minute: '2-digit',
+          month: 'short',
+          day: 'numeric',
+        });
+      }
+    }
+    return trimmed;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatEtaValue(item)).join(', ');
+  }
+  return JSON.stringify(value);
+}
+
+function flattenEta(data: unknown, prefix?: string): EtaLine[] {
+  if (!data || typeof data !== 'object') return [];
+
+  return Object.entries(data as Record<string, unknown>).flatMap(([key, value]) => {
+    const label = prefix ? `${prefix} · ${humanizeKey(key)}` : humanizeKey(key);
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) return [];
+      if (value.every((item) => item == null || typeof item !== 'object')) {
+        return [{ label, value: formatEtaValue(value) }];
+      }
+      return value.flatMap((item, index) => flattenEta(item, `${label} ${index + 1}`));
+    }
+
+    if (value && typeof value === 'object') {
+      return flattenEta(value, label);
+    }
+
+    return [{ label, value: formatEtaValue(value) }];
+  });
+}
+
+function formatLastUpdated(value?: string | number | null) {
+  if (!value) return 'Sin sincronizar';
+  const parsed = typeof value === 'number' ? new Date(value) : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Sin sincronizar';
+  return parsed.toLocaleTimeString('es-PR', {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
 
 export default function TransportScreen() {
+  const router = useRouter();
+  const params = useLocalSearchParams();
   const bootstrapQuery = useBootstrapQuery();
   const routesQuery = useRoutesQuery();
   const stopsQuery = useStopsQuery();
   const positionsQuery = usePositionsQuery();
-  const { favorites, toggleStopFavorite, isStopFavorite } = useFavorites();
-
+  const [userLocation, setUserLocation] = useState<LatLng | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('mapa');
   const [searchText, setSearchText] = useState('');
   const [radiusMeters, setRadiusMeters] = useState(600);
   const [locationStatus, setLocationStatus] = useState<'idle' | 'loading' | 'granted' | 'denied'>(
     'idle',
   );
-  const [userLocation, setUserLocation] = useState<LatLng | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
+
+  const trackingQuery = useTrackingQuery();
+  const nearbyStopsQuery = useNearbyStopsQuery(userLocation?.lat, userLocation?.lng, { limit: 5 });
+  const { favorites, toggleStopFavorite, isStopFavorite } = useFavorites();
 
   const [selectedStop, setSelectedStop] = useState<RoutePoint | null>(null);
+
+  const discoveryNearbyQuery = useDiscoveryQuery({
+    lat: selectedStop?.lat,
+    lng: selectedStop?.lng,
+    radiusMeters: 500,
+    limit: 6
+  });
+
   const [selectedTrolley, setSelectedTrolley] = useState<Position | null>(null);
   const [showEta, setShowEta] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
 
   const [originChoice, setOriginChoice] = useState<LocationChoice | null>(null);
   const [destinationChoice, setDestinationChoice] = useState<LocationChoice | null>(null);
@@ -56,14 +172,33 @@ export default function TransportScreen() {
   const [planResult, setPlanResult] = useState<RoutePlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
 
-  const etaLatLngs = selectedStop ? `${selectedStop.lat},${selectedStop.lng}` : null;
-  const etaQuery = useEtaQuery(etaLatLngs, undefined, showEta);
-
   const stops = stopsQuery.data?.stops ?? bootstrapQuery.data?.stops ?? [];
   const routePoints = bootstrapQuery.data?.routePoints ?? [];
   const markers = bootstrapQuery.data?.markers ?? [];
   const routes = routesQuery.data?.routes ?? bootstrapQuery.data?.routes ?? [];
   const positions = positionsQuery.data?.positions ?? bootstrapQuery.data?.positions ?? [];
+
+  // Encontrar el trolley más cercano para el ETA si hay una parada seleccionada
+  const nearestTrolleyForStop = useMemo(() => {
+    if (!selectedStop || positions.length === 0) return null;
+    const active = positions.filter((p) => p.lat != null && p.lng != null && p.routeId === selectedStop.routeId);
+    if (active.length === 0) return null;
+
+    const sorted = sortByDistance(active, (p) => ({ lat: p.lat!, lng: p.lng! }), {
+      lat: selectedStop.lat,
+      lng: selectedStop.lng,
+    });
+    return sorted[0].item;
+  }, [selectedStop, positions]);
+
+  const etaQuery = useEtaQuery(
+    {
+      assetId: nearestTrolleyForStop?.assetId,
+      stopId: selectedStop?.id,
+      latlngs: selectedStop ? `${selectedStop.lat},${selectedStop.lng}` : null,
+    },
+    showEta
+  );
 
   const markersById = useMemo(() => {
     const map = new Map<number, ApiMarker>();
@@ -94,18 +229,29 @@ export default function TransportScreen() {
     stopsQuery.error ||
     routesQuery.error ||
     positionsQuery.error ||
-    etaQuery.error;
+    trackingQuery.error;
+    // Quitamos etaQuery.error de aquí para que no bloquee el UI principal
+
+
+  const etaLines = useMemo(() => flattenEta(etaQuery.data), [etaQuery.data]);
 
   const requestLocation = async () => {
-    setLocationStatus('loading');
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      setLocationStatus('denied');
-      return;
+    try {
+      setLocationStatus('loading');
+      setLocationError(null);
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationStatus('denied');
+        setLocationError('Necesitamos permiso de ubicación para mostrar paradas cercanas.');
+        return;
+      }
+      const current = await Location.getCurrentPositionAsync({});
+      setUserLocation({ lat: current.coords.latitude, lng: current.coords.longitude });
+      setLocationStatus('granted');
+    } catch {
+      setLocationStatus('idle');
+      setLocationError('No pudimos obtener tu ubicación ahora mismo. Inténtalo de nuevo.');
     }
-    const current = await Location.getCurrentPositionAsync({});
-    setUserLocation({ lat: current.coords.latitude, lng: current.coords.longitude });
-    setLocationStatus('granted');
   };
 
   const nearbyStops = useMemo(() => {
@@ -149,17 +295,43 @@ export default function TransportScreen() {
     return planOptions.filter((option) => option.label.toLowerCase().includes(lower)).slice(0, 6);
   }, [originQuery, planOptions]);
 
+  const isRefreshing =
+    bootstrapQuery.isFetching ||
+    routesQuery.isFetching ||
+    stopsQuery.isFetching ||
+    positionsQuery.isFetching ||
+    trackingQuery.isFetching;
+
+  const latestFetchAt =
+    positionsQuery.data?.fetchedAt ??
+    bootstrapQuery.data?.fetchedAt ??
+    positionsQuery.dataUpdatedAt ??
+    bootstrapQuery.dataUpdatedAt;
+
+  const refreshAllData = async () => {
+    await Promise.all([
+      bootstrapQuery.refetch(),
+      routesQuery.refetch(),
+      stopsQuery.refetch(),
+      positionsQuery.refetch(),
+      trackingQuery.refetch(),
+    ]);
+  };
+
   const calculatePlan = () => {
     setPlanError(null);
     if (!userLocation && !originChoice) {
-      setPlanError('Necesitas ubicacion u origen seleccionado.');
+      setPlanError('Necesitas ubicación u origen seleccionado.');
       return;
     }
     if (!destinationChoice || routePoints.length === 0) {
       setPlanError('Selecciona un destino y espera datos de rutas.');
       return;
     }
-    const origin = originChoice ?? (userLocation ? { ...userLocation, id: 'me', label: 'Mi ubicacion', type: 'stop' } : null);
+    const origin = originChoice ??
+      (userLocation
+        ? { ...userLocation, id: 'me', label: 'Mi ubicación', type: 'stop' as const }
+        : null);
     if (!origin) return;
     const result = planRoute(
       { lat: origin.lat, lng: origin.lng },
@@ -167,7 +339,7 @@ export default function TransportScreen() {
       routePoints,
     );
     if (!result) {
-      setPlanError('No se encontro una ruta con los datos actuales.');
+      setPlanError('No se encontró una ruta con los datos actuales.');
     }
     setPlanResult(result);
   };
@@ -181,22 +353,154 @@ export default function TransportScreen() {
     setSelectedStop(null);
     setSelectedTrolley(null);
     setShowEta(false);
+    setIsSearching(false);
   };
+
+  const handleSearchResult = (result: SearchResult) => {
+    setIsSearching(false);
+    if (result.type === 'stop') {
+      const stop = stops.find(s => s.id === Number(result.id) || s.markerId === Number(result.id));
+      if (stop) setSelectedStop(stop);
+    } else if (result.type === 'route') {
+      // Navegación futura a detalle de ruta
+      setViewMode('mapa');
+    } else if (result.type === 'evento') {
+      router.push({ pathname: '/descubrir' as any, params: { q: result.title } });
+    } else if (result.type === 'gastronomia') {
+      router.push({ pathname: '/gastronomia' as any, params: { q: result.title } });
+    }
+  };
+
+  // Efecto para manejar navegación externa por parámetros (q, lat, lng)
+  useEffect(() => {
+    if (params.lat && params.lng) {
+      const lat = parseFloat(params.lat as string);
+      const lng = parseFloat(params.lng as string);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        setViewMode('mapa');
+        // Buscar si hay una parada o marcador exacto en esas coordenadas
+        const stopMatch = stops.find(s => Math.abs(s.lat - lat) < 0.0001 && Math.abs(s.lng - lng) < 0.0001);
+        if (stopMatch) {
+          setSelectedStop(stopMatch);
+        } else {
+          // Crear un marcador virtual temporal o simplemente centrar mapa
+          // Por ahora, si no es parada, solo centramos (el usuario verá su pin)
+        }
+      }
+    } else if (params.q) {
+      // Si viene una búsqueda, abrir el buscador con ese texto
+      setSearchText(params.q as string);
+      setViewMode('lista');
+    }
+  }, [params.lat, params.lng, params.q, stops.length]);
+
+  // Intentar obtener ubicación al montar para mostrar paradas cercanas
+  useEffect(() => {
+    if (!userLocation && !isWeb && locationStatus === 'idle') {
+      requestLocation();
+    }
+  }, []);
 
   return (
     <View style={styles.container}>
+      <View
+        style={styles.statusCard}
+        accessibilityRole="summary"
+        accessibilityLabel={`Estado en vivo. ${activePositions.length} trolleys activos, ${stops.length} paradas cargadas y ${routes.length} rutas disponibles. Última actualización ${formatLastUpdated(latestFetchAt)}.`}>
+        <View style={styles.statusHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.statusEyebrow}>Estado en vivo</Text>
+            <Text style={styles.statusTitle}>Red de transporte de Caguas</Text>
+            <Text style={styles.statusMeta}>Actualizado: {formatLastUpdated(latestFetchAt)}</Text>
+          </View>
+          <View style={{ gap: 8, flexDirection: 'row' }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Buscar en Criollos"
+              style={[styles.refreshButton, { backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1' }]}
+              onPress={() => setIsSearching(true)}>
+              <FontAwesome name="search" size={16} color="#475569" />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Actualizar datos de transporte"
+              style={[styles.refreshButton, isRefreshing && styles.refreshButtonDisabled]}
+              onPress={refreshAllData}
+              disabled={isRefreshing}>
+              <FontAwesome name="refresh" size={16} color="#fff" />
+            </Pressable>
+          </View>
+        </View>
+
+        {isSearching && (
+          <View style={{ marginTop: 12 }}>
+            <SearchOverlay 
+              onResultPress={handleSearchResult} 
+              onClose={() => setIsSearching(false)} 
+            />
+          </View>
+        )}
+
+        <View style={styles.statusStatsRow}>
+          <View style={styles.statusStat}>
+            <Text style={styles.statusStatValue}>{activePositions.length}</Text>
+            <Text style={styles.statusStatLabel}>Trolleys activos</Text>
+          </View>
+          <View style={styles.statusStat}>
+            <Text style={styles.statusStatValue}>{stops.length}</Text>
+            <Text style={styles.statusStatLabel}>Paradas</Text>
+          </View>
+          <View style={styles.statusStat}>
+            <Text style={styles.statusStatValue}>{routes.length}</Text>
+            <Text style={styles.statusStatLabel}>Rutas</Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.quickActionsCard}>
+        <Text style={styles.quickActionsTitle}>Moverme por Criollos</Text>
+        <Text style={styles.quickActionsText}>
+          Transporte queda enfocado en mapa, paradas y planificación. La agenda local ahora vive en una pestaña propia para llegar más rápido.
+        </Text>
+        <View style={styles.quickActionsRow}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Abrir pestaña Eventos"
+            style={styles.quickActionButton}
+            onPress={() => router.push('/(tabs)/eventos' as never)}>
+            <Text style={styles.quickActionButtonText}>Ir a Eventos</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Abrir pestaña Gastronomía"
+            style={styles.quickActionGhostButton}
+            onPress={() => router.push('/(tabs)/gastronomia' as never)}>
+            <Text style={styles.quickActionGhostText}>Ver Gastronomía</Text>
+          </Pressable>
+        </View>
+      </View>
+
       <View style={styles.toggleRow}>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Ver mapa del transporte"
+          accessibilityState={{ selected: viewMode === 'mapa' }}
           style={[styles.toggleButton, viewMode === 'mapa' && styles.toggleButtonActive]}
           onPress={() => setViewMode('mapa')}>
           <Text style={styles.toggleText}>Mapa</Text>
         </Pressable>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Ver lista de trolleys y paradas"
+          accessibilityState={{ selected: viewMode === 'lista' }}
           style={[styles.toggleButton, viewMode === 'lista' && styles.toggleButtonActive]}
           onPress={() => setViewMode('lista')}>
           <Text style={styles.toggleText}>Lista</Text>
         </Pressable>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Planificar una ruta"
+          accessibilityState={{ selected: viewMode === 'planner' }}
           style={[styles.toggleButton, viewMode === 'planner' && styles.toggleButtonActive]}
           onPress={() => setViewMode('planner')}>
           <Text style={styles.toggleText}>Ruta</Text>
@@ -205,30 +509,108 @@ export default function TransportScreen() {
       {apiError && (
         <View style={styles.errorBanner}>
           <Text style={styles.errorText}>No se pudo cargar la data en este momento.</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Reintentar carga de datos de transporte"
+            style={styles.errorRetryButton}
+            onPress={refreshAllData}>
+            <Text style={styles.errorRetryText}>Reintentar</Text>
+          </Pressable>
         </View>
       )}
 
       {viewMode === 'mapa' && (
-        <MapView style={styles.map} initialRegion={{ ...CAGUAS_CENTER, latitudeDelta: 0.07, longitudeDelta: 0.07 }} showsUserLocation>
-          {stops.map((stop) => (
-            <Marker
-              key={`stop-${stop.id}`}
-              coordinate={{ latitude: stop.lat, longitude: stop.lng }}
-              title={stopLabel(stop)}
-              pinColor="#1d4ed8"
-              onPress={() => setSelectedStop(stop)}
-            />
-          ))}
-          {activePositions.map((pos) => (
-            <Marker
-              key={`pos-${pos.assetId ?? `${pos.lat}-${pos.lng}`}`}
-              coordinate={{ latitude: pos.lat as number, longitude: pos.lng as number }}
-              title={`Trolley ${pos.assetId ?? ''}`}
-              pinColor="#dc2626"
-              onPress={() => setSelectedTrolley(pos)}
-            />
-          ))}
-        </MapView>
+        <View style={styles.mapWrap}>
+          {isWeb ? (
+            <View style={styles.webMapFallback}>
+              <Text style={styles.sectionTitle}>Mapa interactivo disponible en iOS y Android</Text>
+              <Text style={styles.helperText}>
+                En web dejamos un resumen rápido mientras mantenemos la experiencia móvil con mapa en vivo.
+              </Text>
+              <View style={styles.statusStatsRow}>
+                <View style={styles.statusStat}>
+                  <Text style={styles.statusStatValue}>{activePositions.length}</Text>
+                  <Text style={styles.statusStatLabel}>Trolleys activos</Text>
+                </View>
+                <View style={styles.statusStat}>
+                  <Text style={styles.statusStatValue}>{stops.length}</Text>
+                  <Text style={styles.statusStatLabel}>Paradas</Text>
+                </View>
+              </View>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Paradas destacadas</Text>
+                {stops.slice(0, 6).map((stop) => (
+                  <Pressable
+                    key={`web-stop-${stop.id}`}
+                    onPress={() => setSelectedStop(stop)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${stopLabel(stop)}, ruta ${stop.routeId ?? 'N/A'}`}>
+                    <View style={styles.listItem}>
+                      <Text style={styles.listTitle}>{stopLabel(stop)}</Text>
+                      <Text style={styles.listMeta}>Ruta {stop.routeId ?? 'N/A'}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          ) : (
+            <>
+              <MapView
+                style={styles.map}
+                accessibilityLabel="Mapa de trolleys y paradas de Caguas"
+                initialRegion={{ ...CAGUAS_CENTER, latitudeDelta: 0.07, longitudeDelta: 0.07 }}
+                showsUserLocation>
+                {stops.map((stop) => (
+                  <Marker
+                    key={`stop-${stop.id}`}
+                    coordinate={{ latitude: stop.lat, longitude: stop.lng }}
+                    title={stopLabel(stop)}
+                    description={`Ruta ${stop.routeId ?? 'N/A'}`}
+                    pinColor="#1d4ed8"
+                    onPress={() => setSelectedStop(stop)}
+                  />
+                ))}
+                {activePositions.map((pos) => (
+                  <Marker
+                    key={`pos-${pos.assetId ?? `${pos.lat}-${pos.lng}`}`}
+                    coordinate={{ latitude: pos.lat as number, longitude: pos.lng as number }}
+                    title={`Trolley ${pos.assetId ?? ''}`}
+                    description={`Ruta ${pos.routeId ?? 'N/A'}`}
+                    pinColor="#dc2626"
+                    onPress={() => setSelectedTrolley(pos)}
+                  />
+                ))}
+              </MapView>
+
+              <View style={styles.dashboardOverlay}>
+                <TrackingDashboard
+                  snapshot={trackingQuery.data}
+                />
+              </View>
+
+              <View style={styles.nearbyOverlay}>
+                <NearbyStopsPanel 
+                  stops={nearbyStopsQuery.data?.data}
+                  isLoading={nearbyStopsQuery.isLoading}
+                  onStopPress={(stop) => {
+                    const stopObj = stops.find(s => s.markerId === stop.markerId);
+                    if (stopObj) setSelectedStop(stopObj);
+                  }}
+                />
+              </View>
+
+              <View style={styles.debugOverlay} pointerEvents="none">
+                <Text style={styles.debugText}>v1.1.2 (25) · Vistas integradas</Text>
+              </View>
+              {isRefreshing && (
+                <View style={styles.mapLoadingOverlay} pointerEvents="none">
+                  <ActivityIndicator color="#2563eb" />
+                  <Text style={styles.mapLoadingText}>Sincronizando transporte...</Text>
+                </View>
+              )}
+            </>
+          )}
+        </View>
       )}
 
       {viewMode === 'lista' && (
@@ -237,15 +619,21 @@ export default function TransportScreen() {
             <TextInput
               style={styles.searchInput}
               placeholder="Buscar paradas..."
+              accessibilityLabel="Buscar paradas"
+              accessibilityHint="Filtra la lista de paradas por nombre"
               value={searchText}
               onChangeText={setSearchText}
             />
           </View>
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Cerca de mi</Text>
-            <Pressable style={styles.primaryButton} onPress={requestLocation}>
+            <Text style={styles.sectionTitle}>Cerca de mí</Text>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={requestLocation}
+              accessibilityRole="button"
+              accessibilityLabel="Actualizar ubicación actual">
               <Text style={styles.primaryButtonText}>
-                {locationStatus === 'loading' ? 'Buscando...' : 'Actualizar ubicacion'}
+                {locationStatus === 'loading' ? 'Buscando...' : 'Actualizar ubicación'}
               </Text>
             </Pressable>
             <View style={styles.radiusRow}>
@@ -254,16 +642,22 @@ export default function TransportScreen() {
                 style={styles.radiusInput}
                 value={String(radiusMeters)}
                 keyboardType="numeric"
+                accessibilityLabel="Radio de búsqueda en metros"
                 onChangeText={(value) => {
                   const parsed = Number.parseInt(value, 10);
                   if (!Number.isNaN(parsed)) setRadiusMeters(parsed);
                 }}
               />
             </View>
+            {locationError && <Text style={styles.helperText}>{locationError}</Text>}
             {userLocation ? (
               nearbyStops.length > 0 ? (
                 nearbyStops.map(({ item, distance }) => (
-                  <Pressable key={`nearby-${item.id}`} onPress={() => setSelectedStop(item)}>
+                  <Pressable
+                    key={`nearby-${item.id}`}
+                    onPress={() => setSelectedStop(item)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${stopLabel(item)}, a ${formatDistance(distance)}`}>
                     <View style={styles.listItem}>
                       <Text style={styles.listTitle}>{stopLabel(item)}</Text>
                       <Text style={styles.listMeta}>{formatDistance(distance)}</Text>
@@ -274,7 +668,7 @@ export default function TransportScreen() {
                 <Text style={styles.helperText}>No hay paradas cerca en ese radio.</Text>
               )
             ) : (
-              <Text style={styles.helperText}>Activa ubicacion para ver paradas cercanas.</Text>
+              <Text style={styles.helperText}>Activa ubicación para ver paradas cercanas.</Text>
             )}
           </View>
 
@@ -285,7 +679,11 @@ export default function TransportScreen() {
                 .map((stopId) => stops.find((stop) => stop.id === stopId))
                 .filter(Boolean)
                 .map((stop) => (
-                  <Pressable key={`fav-stop-${stop?.id}`} onPress={() => stop && setSelectedStop(stop)}>
+                  <Pressable
+                    key={`fav-stop-${stop?.id}`}
+                    onPress={() => stop && setSelectedStop(stop)}
+                    accessibilityRole="button"
+                    accessibilityLabel={stop ? `Abrir parada favorita ${stopLabel(stop)}` : 'Abrir parada favorita'}>
                     <View style={styles.listItem}>
                       <Text style={styles.listTitle}>{stop ? stopLabel(stop) : 'Parada'}</Text>
                     </View>
@@ -296,46 +694,65 @@ export default function TransportScreen() {
           <Text style={styles.sectionTitle}>Trolleys activos</Text>
           {positionsQuery.isLoading ? (
             <ActivityIndicator />
-          ) : (
+          ) : activePositions.length > 0 ? (
             activePositions.map((pos) => (
-              <Pressable key={`list-pos-${pos.assetId ?? `${pos.lat}-${pos.lng}`}`} onPress={() => setSelectedTrolley(pos)}>
+              <Pressable
+                key={`list-pos-${pos.assetId ?? `${pos.lat}-${pos.lng}`}`}
+                onPress={() => setSelectedTrolley(pos)}
+                accessibilityRole="button"
+                accessibilityLabel={`Trolley ${pos.assetId ?? 'N/A'}, ruta ${pos.routeId ?? 'N/A'}`}>
                 <View style={styles.listItem}>
                   <Text style={styles.listTitle}>Trolley {pos.assetId ?? 'N/A'}</Text>
                   <Text style={styles.listMeta}>Ruta {pos.routeId ?? 'N/A'}</Text>
                 </View>
               </Pressable>
             ))
+          ) : (
+            <Text style={styles.helperText}>No hay trolleys activos reportados ahora mismo.</Text>
           )}
 
           <Text style={styles.sectionTitle}>Paradas</Text>
-          {filteredStops.map((stop) => (
-            <Pressable key={`list-stop-${stop.id}`} onPress={() => setSelectedStop(stop)}>
-              <View style={styles.listItem}>
-                <Text style={styles.listTitle}>{stopLabel(stop)}</Text>
-                <Text style={styles.listMeta}>Ruta {stop.routeId ?? 'N/A'}</Text>
-              </View>
-            </Pressable>
-          ))}
+          {filteredStops.length > 0 ? (
+            filteredStops.map((stop) => (
+              <Pressable
+                key={`list-stop-${stop.id}`}
+                onPress={() => setSelectedStop(stop)}
+                accessibilityRole="button"
+                accessibilityLabel={`${stopLabel(stop)}, ruta ${stop.routeId ?? 'N/A'}`}>
+                <View style={styles.listItem}>
+                  <Text style={styles.listTitle}>{stopLabel(stop)}</Text>
+                  <Text style={styles.listMeta}>Ruta {stop.routeId ?? 'N/A'}</Text>
+                </View>
+              </Pressable>
+            ))
+          ) : (
+            <Text style={styles.helperText}>No encontramos paradas con ese filtro.</Text>
+          )}
         </ScrollView>
       )}
 
       {viewMode === 'planner' && (
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Ubicacion</Text>
-            <Pressable style={styles.primaryButton} onPress={requestLocation}>
+            <Text style={styles.sectionTitle}>Ubicación</Text>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={requestLocation}
+              accessibilityRole="button"
+              accessibilityLabel="Usar mi ubicación actual para planificar ruta">
               <Text style={styles.primaryButtonText}>
-                {locationStatus === 'loading' ? 'Buscando...' : 'Usar mi ubicacion'}
+                {locationStatus === 'loading' ? 'Buscando...' : 'Usar mi ubicación'}
               </Text>
             </Pressable>
             {userLocation && (
               <Text style={styles.helperText}>
-                Ubicacion actual: {userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)}
+                Ubicación actual: {userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)}
               </Text>
             )}
             {locationStatus === 'denied' && (
-              <Text style={styles.helperText}>Permiso denegado. Habilitalo en Ajustes.</Text>
+              <Text style={styles.helperText}>Permiso denegado. Habilítalo en Ajustes.</Text>
             )}
+            {locationError && <Text style={styles.helperText}>{locationError}</Text>}
           </View>
 
           <View style={styles.section}>
@@ -343,16 +760,17 @@ export default function TransportScreen() {
             {originChoice ? (
               <View style={styles.selectedChip}>
                 <Text>{originChoice.label}</Text>
-                <Pressable onPress={() => setOriginChoice(null)}>
+                <Pressable onPress={() => setOriginChoice(null)} accessibilityRole="button" accessibilityLabel="Quitar origen seleccionado">
                   <Text style={styles.linkText}>Quitar</Text>
                 </Pressable>
               </View>
             ) : (
               <>
-                <Text style={styles.helperText}>Si no eliges origen, usamos tu ubicacion.</Text>
+                <Text style={styles.helperText}>Si no eliges origen, usamos tu ubicación.</Text>
                 <TextInput
                   style={styles.searchInput}
                   placeholder="Buscar origen (parada o lugar)"
+                  accessibilityLabel="Buscar origen"
                   value={originQuery}
                   onChangeText={setOriginQuery}
                 />
@@ -362,7 +780,9 @@ export default function TransportScreen() {
                     onPress={() => {
                       setOriginChoice(option);
                       setOriginQuery('');
-                    }}>
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Seleccionar origen ${option.label}`}>
                     <View style={styles.listItem}>
                       <Text style={styles.listTitle}>{option.label}</Text>
                       <Text style={styles.listMeta}>{option.type === 'stop' ? 'Parada' : 'Lugar'}</Text>
@@ -378,7 +798,7 @@ export default function TransportScreen() {
             {destinationChoice ? (
               <View style={styles.selectedChip}>
                 <Text>{destinationChoice.label}</Text>
-                <Pressable onPress={() => setDestinationChoice(null)}>
+                <Pressable onPress={() => setDestinationChoice(null)} accessibilityRole="button" accessibilityLabel="Quitar destino seleccionado">
                   <Text style={styles.linkText}>Quitar</Text>
                 </Pressable>
               </View>
@@ -387,6 +807,7 @@ export default function TransportScreen() {
                 <TextInput
                   style={styles.searchInput}
                   placeholder="Buscar parada o lugar..."
+                  accessibilityLabel="Buscar destino"
                   value={plannerQuery}
                   onChangeText={setPlannerQuery}
                 />
@@ -396,7 +817,9 @@ export default function TransportScreen() {
                     onPress={() => {
                       setDestinationChoice(option);
                       setPlannerQuery('');
-                    }}>
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Seleccionar destino ${option.label}`}>
                     <View style={styles.listItem}>
                       <Text style={styles.listTitle}>{option.label}</Text>
                       <Text style={styles.listMeta}>{option.type === 'stop' ? 'Parada' : 'Lugar'}</Text>
@@ -407,7 +830,11 @@ export default function TransportScreen() {
             )}
           </View>
 
-          <Pressable style={styles.primaryButton} onPress={calculatePlan}>
+          <Pressable
+            style={styles.primaryButton}
+            onPress={calculatePlan}
+            accessibilityRole="button"
+            accessibilityLabel="Calcular ruta hacia el destino seleccionado">
             <Text style={styles.primaryButtonText}>Calcular ruta</Text>
           </Pressable>
 
@@ -419,31 +846,40 @@ export default function TransportScreen() {
               <Text style={styles.helperText}>
                 {Math.round(planResult.totalDurationSec / 60)} min · {formatDistance(planResult.totalDistanceMeters)}
               </Text>
-              <MapView
-                style={styles.plannerMap}
-                initialRegion={{ ...CAGUAS_CENTER, latitudeDelta: 0.07, longitudeDelta: 0.07 }}>
-                {planResult.steps.map((step, index) => (
-                  <Polyline
-                    key={`step-${index}`}
-                    coordinates={[
-                      { latitude: step.from.lat, longitude: step.from.lng },
-                      { latitude: step.to.lat, longitude: step.to.lng },
-                    ]}
-                    strokeWidth={4}
-                    strokeColor={
-                      step.mode === 'walk' ? '#16a34a' : step.mode === 'transfer' ? '#f97316' : '#2563eb'
-                    }
-                  />
-                ))}
-              </MapView>
+              {isWeb ? (
+                <View style={styles.webPlannerFallback}>
+                  <Text style={styles.helperText}>
+                    El mapa de la ruta se muestra en móvil; en web te dejamos el itinerario detallado abajo.
+                  </Text>
+                </View>
+              ) : (
+                <MapView
+                  style={styles.plannerMap}
+                  accessibilityLabel="Mapa con la ruta recomendada"
+                  initialRegion={{ ...CAGUAS_CENTER, latitudeDelta: 0.07, longitudeDelta: 0.07 }}>
+                  {planResult.steps.map((step, index) => (
+                    <Polyline
+                      key={`step-${index}`}
+                      coordinates={[
+                        { latitude: step.from.lat, longitude: step.from.lng },
+                        { latitude: step.to.lat, longitude: step.to.lng },
+                      ]}
+                      strokeWidth={4}
+                      strokeColor={
+                        step.mode === 'walk' ? '#16a34a' : step.mode === 'transfer' ? '#f97316' : '#2563eb'
+                      }
+                    />
+                  ))}
+                </MapView>
+              )}
               {planResult.steps.map((step, index) => (
                 <View key={`step-list-${index}`} style={styles.listItem}>
                   <Text style={styles.listTitle}>
                     {step.mode === 'walk'
                       ? 'Camina'
                       : step.mode === 'transfer'
-                      ? 'Transbordo'
-                      : `Trolley ruta ${step.routeId ?? 'N/A'}`}
+                        ? 'Transbordo'
+                        : `Trolley ruta ${step.routeId ?? 'N/A'}`}
                   </Text>
                   <Text style={styles.listMeta}>
                     {Math.round(step.durationSec / 60)} min · {formatDistance(step.distanceMeters)}
@@ -466,22 +902,71 @@ export default function TransportScreen() {
                   {selectedRoutes.map((route) => route.description ?? `Ruta ${route.id}`).join(', ')}
                 </Text>
               )}
-              <Pressable style={styles.secondaryButton} onPress={() => toggleStopFavorite(selectedStop.id)}>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => toggleStopFavorite(selectedStop.id)}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  isStopFavorite(selectedStop.id)
+                    ? 'Quitar parada de favoritos'
+                    : 'Guardar parada en favoritos'
+                }>
                 <Text style={styles.secondaryButtonText}>
                   {isStopFavorite(selectedStop.id) ? 'Quitar de favoritos' : 'Guardar como favorita'}
                 </Text>
               </Pressable>
-              <Pressable style={styles.primaryButton} onPress={() => setShowEta((prev) => !prev)}>
-                <Text style={styles.primaryButtonText}>Ver ETA</Text>
+              <Pressable
+                style={styles.primaryButton}
+                onPress={() => setShowEta((prev) => !prev)}
+                accessibilityHint="Abre la tarjeta con tiempos estimados de llegada para esta parada.">
+                <Text style={styles.primaryButtonText}>{showEta ? 'Ocultar ETA' : 'Ver ETA'}</Text>
               </Pressable>
+
+              <View style={styles.discoveryNearbySection}>
+                <Text style={styles.sectionTitle}>Descubre cerca de esta parada</Text>
+                {discoveryNearbyQuery.isLoading ? (
+                  <ActivityIndicator style={{ marginTop: 10 }} />
+                ) : discoveryNearbyQuery.data?.data && discoveryNearbyQuery.data.data.length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.discoveryNearbyScroll}>
+                    {discoveryNearbyQuery.data.data.map((item) => (
+                      <Pressable 
+                        key={item.id} 
+                        style={styles.discoveryNearbyCard}
+                        onPress={() => {
+                          if (item.type === 'evento') {
+                            router.push({ pathname: '/eventos' as any, params: { q: item.title } });
+                          } else {
+                            router.push({ pathname: '/gastronomia' as any, params: { q: item.title } });
+                          }
+                          closeModal();
+                        }}>
+                        <Text style={styles.discoveryNearbyType}>{item.tag || item.type}</Text>
+                        <Text style={styles.discoveryNearbyTitle} numberOfLines={2}>{item.title}</Text>
+                        <Text style={styles.discoveryNearbySubtitle}>{item.subtitle}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <Text style={styles.helperText}>No se encontraron eventos o lugares cerca ahora mismo.</Text>
+                )}
+              </View>
+
               {showEta && (
                 <View style={styles.etaBox}>
+                  <Text style={styles.etaTitle}>Tiempo estimado</Text>
                   {etaQuery.isLoading ? (
                     <ActivityIndicator />
-                  ) : etaQuery.data ? (
-                    <Text style={styles.helperText}>{JSON.stringify(etaQuery.data)}</Text>
+                  ) : etaQuery.isError ? (
+                    <Text style={styles.helperText}>No pudimos cargar el ETA ahora mismo.</Text>
+                  ) : etaLines.length > 0 ? (
+                    etaLines.map((line) => (
+                      <View key={`${line.label}-${line.value}`} style={styles.etaRow}>
+                        <Text style={styles.etaLabel}>{line.label}</Text>
+                        <Text style={styles.etaValue}>{line.value}</Text>
+                      </View>
+                    ))
                   ) : (
-                    <Text style={styles.helperText}>No hay datos de ETA.</Text>
+                    <Text style={styles.helperText}>No hay datos de ETA disponibles para esta parada.</Text>
                   )}
                 </View>
               )}
@@ -493,9 +978,12 @@ export default function TransportScreen() {
               <Text style={styles.modalSubtitle}>Ruta {selectedTrolley.routeId ?? 'N/A'}</Text>
               <Text style={styles.helperText}>Velocidad: {selectedTrolley.speed ?? 'N/A'}</Text>
               <Text style={styles.helperText}>Estado: {selectedTrolley.status ?? 'N/A'}</Text>
+              {selectedTrolley.when && (
+                <Text style={styles.helperText}>Última actualización: {formatEtaValue(selectedTrolley.when)}</Text>
+              )}
             </>
           )}
-          <Pressable style={styles.linkButton} onPress={closeModal}>
+          <Pressable style={styles.linkButton} onPress={closeModal} accessibilityRole="button" accessibilityLabel="Cerrar detalle">
             <Text style={styles.linkText}>Cerrar</Text>
           </Pressable>
         </View>
@@ -508,6 +996,120 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
+  },
+  statusCard: {
+    marginHorizontal: 12,
+    marginTop: 12,
+    marginBottom: 4,
+    borderRadius: 16,
+    backgroundColor: '#eff6ff',
+    padding: 14,
+    gap: 14,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  statusHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  statusEyebrow: {
+    color: '#1d4ed8',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  statusTitle: {
+    color: '#0f172a',
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  statusMeta: {
+    color: '#475569',
+    marginTop: 4,
+  },
+  refreshButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2563eb',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  refreshButtonDisabled: {
+    opacity: 0.7,
+  },
+  refreshButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  statusStatsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  statusStat: {
+    flex: 1,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    padding: 12,
+    gap: 4,
+  },
+  statusStatValue: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  statusStatLabel: {
+    color: '#475569',
+    fontSize: 12,
+  },
+  quickActionsCard: {
+    marginHorizontal: 12,
+    marginTop: 4,
+    borderRadius: 16,
+    backgroundColor: '#fff7ed',
+    borderWidth: 1,
+    borderColor: '#fdba74',
+    padding: 14,
+    gap: 10,
+  },
+  quickActionsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#9a3412',
+  },
+  quickActionsText: {
+    color: '#7c2d12',
+    lineHeight: 20,
+  },
+  quickActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  quickActionButton: {
+    flex: 1,
+    borderRadius: 10,
+    backgroundColor: '#ea580c',
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  quickActionButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  quickActionGhostButton: {
+    flex: 1,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#fdba74',
+    backgroundColor: '#fff',
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  quickActionGhostText: {
+    color: '#9a3412',
+    fontWeight: '700',
   },
   toggleRow: {
     flexDirection: 'row',
@@ -534,13 +1136,67 @@ const styles = StyleSheet.create({
     backgroundColor: '#fee2e2',
     paddingHorizontal: 12,
     paddingVertical: 8,
+    gap: 8,
   },
   errorText: {
     color: '#b91c1c',
     fontWeight: '600',
   },
+  errorRetryButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  errorRetryText: {
+    color: '#b91c1c',
+    fontWeight: '700',
+  },
+  mapWrap: {
+    flex: 1,
+  },
+  webMapFallback: {
+    flex: 1,
+    padding: 16,
+    gap: 12,
+  },
   map: {
     flex: 1,
+  },
+  dashboardOverlay: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    right: 10,
+    zIndex: 20,
+  },
+  nearbyOverlay: {
+    position: 'absolute',
+    bottom: 40,
+    left: 0,
+    right: 0,
+    zIndex: 20,
+  },
+  mapLoadingOverlay: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    left: 16,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  mapLoadingText: {
+    color: '#1d4ed8',
+    fontWeight: '600',
   },
   scrollContent: {
     padding: 16,
@@ -646,13 +1302,88 @@ const styles = StyleSheet.create({
   },
   etaBox: {
     marginTop: 8,
-    padding: 10,
+    padding: 12,
     backgroundColor: '#f8fafc',
     borderRadius: 10,
+    gap: 10,
+  },
+  etaTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  etaRow: {
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    gap: 4,
+  },
+  etaLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    color: '#475569',
+  },
+  etaValue: {
+    fontSize: 15,
+    color: '#0f172a',
+  },
+  webPlannerFallback: {
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#eff6ff',
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
   },
   plannerMap: {
     height: 220,
     borderRadius: 12,
     marginTop: 8,
+  },
+  debugOverlay: {
+    position: 'absolute',
+    bottom: 10,
+    left: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 4,
+    borderRadius: 4,
+  },
+  debugText: {
+    color: '#fff',
+    fontSize: 10,
+  },
+  discoveryNearbySection: {
+    marginTop: 16,
+    gap: 8,
+  },
+  discoveryNearbyScroll: {
+    gap: 12,
+    paddingRight: 20,
+  },
+  discoveryNearbyCard: {
+    width: 160,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 4,
+  },
+  discoveryNearbyType: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#2563eb',
+    textTransform: 'uppercase',
+  },
+  discoveryNearbyTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  discoveryNearbySubtitle: {
+    fontSize: 12,
+    color: '#64748b',
   },
 });
