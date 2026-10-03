@@ -1,5 +1,6 @@
 import type { RoutePoint } from './transportTypes';
 import { haversineMeters, type LatLng } from './transportGeo';
+import { validCoordinates } from './transportContracts';
 
 type EdgeMode = 'walk' | 'trolley' | 'transfer';
 
@@ -225,7 +226,10 @@ export function planRoute(
   routePoints: RoutePoint[],
   options: PlanOptions = {},
 ): RoutePlan | null {
+  if (!validCoordinates(origin.lat, origin.lng) || !validCoordinates(destination.lat, destination.lng)) return null;
   const maxWalkMeters = options.maxWalkMeters ?? 650;
+  if (!Number.isFinite(maxWalkMeters) || maxWalkMeters < 0) return null;
+  routePoints = routePoints.filter((point) => validCoordinates(point.lat, point.lng));
   const graph = buildGraph(routePoints);
 
   const originId = 'origin';
@@ -233,6 +237,16 @@ export function planRoute(
 
   graph.set(originId, { node: { id: originId, latlng: origin }, edges: [] });
   graph.set(destinationId, { node: { id: destinationId, latlng: destination }, edges: [] });
+
+  const directWalkDistance = haversineMeters(origin, destination);
+  if (directWalkDistance <= maxWalkMeters) {
+    graph.get(originId)?.edges.push({
+      to: destinationId,
+      weight: directWalkDistance / WALKING_SPEED_MPS,
+      mode: 'walk',
+      distanceMeters: directWalkDistance,
+    });
+  }
 
   const connectWalk = (fromId: string, fromLatLng: LatLng, toPoint: RoutePoint) => {
     const distanceMeters = haversineMeters(fromLatLng, { lat: toPoint.lat, lng: toPoint.lng });
@@ -258,7 +272,8 @@ export function planRoute(
     });
   };
 
-  routePoints.forEach((point) => {
+  // Board and leave a trolley only at designated stops. Shape points are not stops.
+  routePoints.filter((point) => point.markerId != null).forEach((point) => {
     connectWalk(originId, origin, point);
     connectWalkReverse(destinationId, destination, point);
   });

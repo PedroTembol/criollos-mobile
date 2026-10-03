@@ -1,10 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { normalizeApiBaseUrl } from './transportContracts';
 
 type TransportSettings = {
   lowDataMode: boolean;
   apiBaseUrl: string | null;
   positionRefreshMs: number;
+  ready: boolean;
   setLowDataMode: (value: boolean) => void;
   setApiBaseUrl: (value: string) => void;
 };
@@ -23,6 +25,7 @@ type StoredSettings = {
 export function TransportSettingsProvider({ children }: { children: React.ReactNode }) {
   const [lowDataMode, setLowDataModeState] = useState(false);
   const [apiBaseUrl, setApiBaseUrlState] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let isActive = true;
@@ -31,10 +34,15 @@ export function TransportSettingsProvider({ children }: { children: React.ReactN
       .then((stored) => {
         if (!stored || !isActive) return;
         if (typeof stored.lowDataMode === 'boolean') setLowDataModeState(stored.lowDataMode);
-        if (typeof stored.apiBaseUrl === 'string') setApiBaseUrlState(stored.apiBaseUrl);
+        if (typeof stored.apiBaseUrl === 'string' && stored.apiBaseUrl.trim()) {
+          try { setApiBaseUrlState(normalizeApiBaseUrl(stored.apiBaseUrl)); } catch { /* Ignore invalid legacy URLs. */ }
+        }
       })
       .catch(() => {
         // ignore load errors
+      })
+      .finally(() => {
+        if (isActive) setReady(true);
       });
 
     return () => {
@@ -58,7 +66,7 @@ export function TransportSettingsProvider({ children }: { children: React.ReactN
 
   const setApiBaseUrl = useCallback(
     (value: string) => {
-      const nextValue = value.trim();
+      const nextValue = value.trim() ? normalizeApiBaseUrl(value) : '';
       setApiBaseUrlState(nextValue.length > 0 ? nextValue : null);
       persist({ lowDataMode, apiBaseUrl: nextValue.length > 0 ? nextValue : null });
     },
@@ -69,11 +77,12 @@ export function TransportSettingsProvider({ children }: { children: React.ReactN
     return {
       lowDataMode,
       apiBaseUrl,
+      ready,
       positionRefreshMs: lowDataMode ? LOW_DATA_REFRESH_MS : DEFAULT_REFRESH_MS,
       setLowDataMode,
       setApiBaseUrl,
     };
-  }, [apiBaseUrl, lowDataMode, setApiBaseUrl, setLowDataMode]);
+  }, [apiBaseUrl, lowDataMode, ready, setApiBaseUrl, setLowDataMode]);
 
   return <TransportSettingsContext.Provider value={value}>{children}</TransportSettingsContext.Provider>;
 }

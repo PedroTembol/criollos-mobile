@@ -1,26 +1,27 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   Image,
-  Linking,
   Pressable,
-  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+
+import { FeedEmptyState, FeedStatus } from '@/components/FeedStatus';
+import { useContentFilters } from '@/components/useContentFilters';
+import { useContentActions } from '@/components/useContentActions';
+import type { GastronomiaPlace } from '@/components/transportTypes';
 
 import { DiscoverySearch } from '@/components/DiscoverySearch';
 import { GastronomiaSummaryPanel } from '@/components/GastronomiaSummaryPanel';
 import { useGastronomiaQuery } from '@/components/transportQueries';
 
 export default function GastronomiaScreen() {
-  const router = useRouter();
-  const [filters, setFilters] = useState<{ q?: string; category?: string[] }>({});
-  const gastronomiaQuery = useGastronomiaQuery(filters);
+  const actions = useContentActions();
+  const { filters, queryFilters, setFilters, clearFilters } = useContentFilters({ includeDates: false });
+  const gastronomiaQuery = useGastronomiaQuery(queryFilters);
 
   const handleSearch = useCallback((nextFilters: { q?: string; categories?: string[] }) => {
     setFilters({
@@ -41,28 +42,12 @@ export default function GastronomiaScreen() {
     [gastronomiaQuery.data?.summary?.categories],
   );
 
-  const handleShare = useCallback((item: any) => {
-    const message = `${item.title}\n${item.category}\n\n${item.summary}\n\nVer más en: ${item.sourceUrl}`;
-    Share.share({
-      message,
-      url: item.sourceUrl || undefined,
-      title: item.title,
-    });
-  }, []);
-
-  const handleViewInMap = useCallback((item: any) => {
-    if (item.lat && item.lng) {
-      router.push({
-        pathname: '/',
-        params: { lat: item.lat, lng: item.lng }
-      });
-    } else {
-      router.push({
-        pathname: '/',
-        params: { q: item.title }
-      });
-    }
-  }, [router]);
+  const handleShare = (item: GastronomiaPlace) => actions.share({ title: item.title, location: item.category, description: item.summary, sourceUrl: item.sourceUrl });
+  const handleViewInMap = (item: GastronomiaPlace) => actions.map({ title: item.title });
+  const handleSelectPlace = (placeId: string) => {
+    const place = gastronomiaQuery.data?.summary?.featuredPlaces?.find(item => item.id === placeId);
+    if (place) setFilters({ q: place.title });
+  };
 
   return (
     <View style={styles.container}>
@@ -70,8 +55,8 @@ export default function GastronomiaScreen() {
         data={gastronomiaQuery.data?.data ?? []}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
-        onRefresh={gastronomiaQuery.refetch}
-        refreshing={gastronomiaQuery.isFetching}
+        onRefresh={() => { if (!gastronomiaQuery.isFetching) void gastronomiaQuery.refetch(); }}
+        refreshing={gastronomiaQuery.isFetching && !gastronomiaQuery.isLoading}
         ListHeaderComponent={
           <View style={styles.headerWrap}>
             <View style={styles.heroCard}>
@@ -81,38 +66,28 @@ export default function GastronomiaScreen() {
                 Desde criollo hasta internacional. Explora los mejores restaurantes y chinchorros de Caguas en un solo lugar.
               </Text>
             </View>
-            <GastronomiaSummaryPanel 
-              summary={gastronomiaQuery.data?.summary} 
-              onSelectCategory={handleSelectCategory} 
+            <FeedStatus data={gastronomiaQuery.data} dataUpdatedAt={gastronomiaQuery.dataUpdatedAt} isError={gastronomiaQuery.isError} isFetching={gastronomiaQuery.isFetching} onRetry={() => gastronomiaQuery.refetch()} />
+            <GastronomiaSummaryPanel
+              summary={gastronomiaQuery.data?.summary}
+              onSelectCategory={handleSelectCategory}
+              onSelectRoute={route => setFilters({ category: route.categories })}
+              onSelectPlace={handleSelectPlace}
             />
-            <DiscoverySearch 
-              onSearch={handleSearch} 
+            <DiscoverySearch value={{ q: filters.q, types: filters.type, categories: filters.category }}
+              onClear={clearFilters}
+              onSearch={handleSearch}
               availableCategories={availableCategories}
               hideTypes
             />
           </View>
         }
-        ListEmptyComponent={
-          gastronomiaQuery.isLoading ? (
-            <ActivityIndicator style={styles.loadingIndicator} />
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyTitle}>No encontramos lugares con esos filtros.</Text>
-              <Text style={styles.emptyText}>Prueba otro sabor o limpia la búsqueda para volver a la guía completa.</Text>
-              <Pressable
-                style={styles.linkButton}
-                onPress={() => setFilters({})}
-                accessibilityRole="button"
-                accessibilityLabel="Limpiar filtros de gastronomía">
-                <Text style={styles.linkText}>Limpiar filtros</Text>
-              </Pressable>
-            </View>
-          )
-        }
+        ListEmptyComponent={<FeedEmptyState isLoading={gastronomiaQuery.isLoading} isError={gastronomiaQuery.isError || Boolean(gastronomiaQuery.data?.clientCache?.networkError || gastronomiaQuery.data?.stale || gastronomiaQuery.data?.metadata?.stale || gastronomiaQuery.data?.metadata?.complete === false)} isFetching={gastronomiaQuery.isFetching}
+          onRetry={() => gastronomiaQuery.refetch()} onClear={clearFilters} title="No encontramos lugares con esos filtros."
+          message="Prueba otro texto o limpia los filtros para volver al contenido completo." />}
         renderItem={({ item }) => (
           <View style={styles.card}>
             <Pressable
-              onPress={() => item.sourceUrl && Linking.openURL(item.sourceUrl)}
+              onPress={() => actions.open(item.sourceUrl)}
               disabled={!item.sourceUrl}
               accessibilityRole={item.sourceUrl ? 'link' : 'text'}
               accessibilityLabel={`${item.title}, categoría ${item.category}`}>
@@ -137,16 +112,16 @@ export default function GastronomiaScreen() {
             </Pressable>
 
             <View style={styles.cardActions}>
-              <Pressable 
+              <Pressable
                 onPress={() => handleViewInMap(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"
-                accessibilityLabel="Ver ubicación en el mapa de transporte">
+                accessibilityLabel="Buscar ubicación en el mapa de transporte">
                 <Ionicons name="map-outline" size={18} color="#ea580c" />
-                <Text style={[styles.actionButtonText, { color: '#ea580c' }]}>Mapa</Text>
+                <Text style={[styles.actionButtonText, { color: '#ea580c' }]}>Buscar lugar</Text>
               </Pressable>
 
-              <Pressable 
+              <Pressable
                 onPress={() => handleShare(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"

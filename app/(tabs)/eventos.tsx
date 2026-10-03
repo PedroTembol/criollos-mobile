@@ -1,31 +1,35 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   Image,
-  Linking,
   Pressable,
-  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
 
-import { DiscoverySearch } from '@/components/DiscoverySearch';
+import { FeedEmptyState, FeedStatus } from '@/components/FeedStatus';
+import { useContentFilters } from '@/components/useContentFilters';
+import { useContentActions } from '@/components/useContentActions';
+import type { Evento } from '@/components/transportTypes';
+import { buildEventCalendarUrl } from '@/components/contentCalendar';
+
+import { DiscoverySearch, type DiscoverySearchFilters } from '@/components/DiscoverySearch';
 import { EventosSummaryPanel } from '@/components/EventosSummaryPanel';
 import { useEventosQuery } from '@/components/transportQueries';
 
 export default function EventosScreen() {
-  const router = useRouter();
-  const [filters, setFilters] = useState<{ q?: string; category?: string[] }>({});
-  const eventosQuery = useEventosQuery(filters);
+  const actions = useContentActions();
+  const { filters, queryFilters, setFilters, clearFilters, clearDateFilters, dateError, hasValidDates } = useContentFilters();
+  const eventosQuery = useEventosQuery(queryFilters, hasValidDates);
 
-  const handleSearch = useCallback((nextFilters: { q?: string; categories?: string[] }) => {
+  const handleSearch = useCallback((nextFilters: DiscoverySearchFilters) => {
     setFilters({
       q: nextFilters.q,
       category: nextFilters.categories,
+      from: nextFilters.from,
+      to: nextFilters.to,
     });
   }, []);
 
@@ -41,56 +45,19 @@ export default function EventosScreen() {
     [eventosQuery.data?.summary?.categories],
   );
 
-  const handleShare = useCallback((item: any) => {
-    const message = `${item.title}\n${item.venue}\n\n${item.summary}\n\nVer más en: ${item.sourceUrl}`;
-    Share.share({
-      message,
-      url: item.sourceUrl || undefined,
-      title: item.title,
-    });
-  }, []);
-
-  const handleAddToCalendar = useCallback((item: any) => {
-    if (!item.publishedAt) return;
-
-    const startDate = new Date(item.publishedAt);
-    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000); // +2 hours default
-    
-    const format = (date: Date) => date.toISOString().replace(/-|:|\.\d+/g, '');
-    const dates = `${format(startDate)}/${format(endDate)}`;
-
-    const url = new URL('https://calendar.google.com/calendar/render');
-    url.searchParams.set('action', 'TEMPLATE');
-    url.searchParams.set('text', item.title);
-    url.searchParams.set('dates', dates);
-    url.searchParams.set('details', `${item.summary}\n\nFuente: ${item.sourceUrl}`);
-    url.searchParams.set('location', item.venue || 'Caguas, PR');
-
-    Linking.openURL(url.toString());
-  }, []);
-
-  const handleViewInMap = useCallback((item: any) => {
-    if (item.lat && item.lng) {
-      router.push({
-        pathname: '/',
-        params: { lat: item.lat, lng: item.lng }
-      });
-    } else {
-      router.push({
-        pathname: '/',
-        params: { q: item.venue || item.title }
-      });
-    }
-  }, [router]);
+  const handleShare = (item: Evento) => actions.share({ title: item.title, location: item.venue, description: item.summary, sourceUrl: item.sourceUrl });
+  const calendarUrl = (item: Evento) => buildEventCalendarUrl({ title: item.title, date: item.publishedAt, description: item.summary, location: item.venue, sourceUrl: item.sourceUrl });
+  const handleAddToCalendar = (item: Evento) => actions.open(calendarUrl(item));
+  const handleViewInMap = (item: Evento) => actions.map({ title: item.title, location: item.venue });
 
   return (
     <View style={styles.container}>
       <FlatList
-        data={eventosQuery.data?.data ?? []}
+        data={hasValidDates ? eventosQuery.data?.data ?? [] : []}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
-        onRefresh={eventosQuery.refetch}
-        refreshing={eventosQuery.isFetching}
+        onRefresh={() => { if (hasValidDates && !eventosQuery.isFetching) void eventosQuery.refetch(); }}
+        refreshing={eventosQuery.isFetching && !eventosQuery.isLoading}
         ListHeaderComponent={
           <View style={styles.headerWrap}>
             <View style={styles.heroCard}>
@@ -100,38 +67,27 @@ export default function EventosScreen() {
                 La cartelera oficial de Caguas, desde festivales hasta talleres. Planifica tu semana con el corazón criollo.
               </Text>
             </View>
-            <EventosSummaryPanel 
-              summary={eventosQuery.data?.summary} 
-              onSelectCategory={handleSelectCategory} 
+            <FeedStatus data={hasValidDates ? eventosQuery.data : undefined} dataUpdatedAt={eventosQuery.dataUpdatedAt} isError={eventosQuery.isError} isFetching={eventosQuery.isFetching} onRetry={() => eventosQuery.refetch()} />
+            <EventosSummaryPanel
+              summary={hasValidDates ? eventosQuery.data?.summary : undefined}
+              onSelectCategory={handleSelectCategory}
+              onSelectPlan={plan => setFilters(prev => ({ ...prev, q: plan.primaryEventTitle }))}
             />
-            <DiscoverySearch 
-              onSearch={handleSearch} 
+            <DiscoverySearch value={{ q: filters.q, types: filters.type, categories: filters.category, from: filters.from, to: filters.to }} dateError={dateError}
+              onClear={clearFilters} onClearDates={clearDateFilters}
+              onSearch={handleSearch}
               availableCategories={availableCategories}
               hideTypes
             />
           </View>
         }
-        ListEmptyComponent={
-          eventosQuery.isLoading ? (
-            <ActivityIndicator style={styles.loadingIndicator} />
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyTitle}>No hay eventos con esos filtros.</Text>
-              <Text style={styles.emptyText}>Prueba otro texto o limpia la búsqueda para volver a la agenda completa.</Text>
-              <Pressable
-                style={styles.linkButton}
-                onPress={() => setFilters({})}
-                accessibilityRole="button"
-                accessibilityLabel="Limpiar filtros de eventos">
-                <Text style={styles.linkText}>Limpiar filtros</Text>
-              </Pressable>
-            </View>
-          )
-        }
+        ListEmptyComponent={dateError ? <Text style={styles.emptyText}>Limpia las fechas del enlace para consultar la agenda.</Text> : <FeedEmptyState isLoading={eventosQuery.isLoading || !hasValidDates} isError={eventosQuery.isError || Boolean(eventosQuery.data?.clientCache?.networkError || eventosQuery.data?.stale || eventosQuery.data?.metadata?.stale || eventosQuery.data?.metadata?.complete === false)} isFetching={eventosQuery.isFetching}
+          onRetry={() => eventosQuery.refetch()} onClear={clearFilters} title="No hay eventos con esos filtros."
+          message="Prueba otro texto o limpia los filtros para volver al contenido completo." />}
         renderItem={({ item }) => (
           <View style={styles.card}>
             <Pressable
-              onPress={() => item.sourceUrl && Linking.openURL(item.sourceUrl)}
+              onPress={() => actions.open(item.sourceUrl)}
               disabled={!item.sourceUrl}
               accessibilityRole={item.sourceUrl ? 'link' : 'text'}
               accessibilityLabel={`${item.title}, en ${item.venue || 'Caguas'}${item.rawDate ? `, fecha ${item.rawDate}` : ''}, categoría ${item.category}`}>
@@ -158,16 +114,16 @@ export default function EventosScreen() {
             </Pressable>
 
             <View style={styles.cardActions}>
-              <Pressable 
+              <Pressable
                 onPress={() => handleViewInMap(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"
-                accessibilityLabel="Ver ubicación en el mapa de transporte">
+                accessibilityLabel="Buscar ubicación en el mapa de transporte">
                 <Ionicons name="map-outline" size={18} color="#7c3aed" />
-                <Text style={[styles.actionButtonText, { color: '#7c3aed' }]}>Mapa</Text>
+                <Text style={[styles.actionButtonText, { color: '#7c3aed' }]}>Buscar lugar</Text>
               </Pressable>
 
-              <Pressable 
+              <Pressable
                 onPress={() => handleShare(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"
@@ -176,13 +132,15 @@ export default function EventosScreen() {
                 <Text style={styles.actionButtonText}>Compartir</Text>
               </Pressable>
 
-              <Pressable 
+              <Pressable
+                disabled={!calendarUrl(item)}
+                accessibilityState={{ disabled: !calendarUrl(item) }}
                 onPress={() => handleAddToCalendar(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"
                 accessibilityLabel="Añadir a mi calendario">
                 <Ionicons name="calendar-outline" size={18} color="#475569" />
-                <Text style={styles.actionButtonText}>Calendario</Text>
+                <Text style={styles.actionButtonText}>{calendarUrl(item) ? 'Calendario' : 'Sin fecha'}</Text>
               </Pressable>
             </View>
           </View>

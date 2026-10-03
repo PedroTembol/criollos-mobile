@@ -17,10 +17,11 @@ export function haversineMeters(a: LatLng, b: LatLng) {
 
   const h =
     sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
-  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(h));
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(Math.min(1, Math.max(0, h))));
 }
 
 export function formatDistance(meters: number) {
+  if (!Number.isFinite(meters) || meters < 0) return 'Distancia no disponible';
   if (meters < 1000) return `${Math.round(meters)} m`;
   return `${(meters / 1000).toFixed(1)} km`;
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   StyleSheet,
   Text,
@@ -7,19 +7,25 @@ import {
   ScrollView,
   Pressable,
 } from 'react-native';
+import { ContentDateRange } from './ContentDateRange';
 
-type DiscoveryType = 'evento' | 'gastronomia' | 'info';
+export type DiscoveryType = 'evento' | 'gastronomia' | 'info';
+export type DiscoverySearchFilters = { q?: string; types?: DiscoveryType[]; categories?: string[]; from?: string; to?: string };
 
 interface DiscoverySearchProps {
-  onSearch: (filters: { q?: string; types?: DiscoveryType[]; categories?: string[] }) => void;
+  onSearch: (filters: DiscoverySearchFilters) => void;
+  value: DiscoverySearchFilters;
   availableCategories?: string[];
   hideTypes?: boolean;
+  dateError?: string;
+  onClear?: () => void;
+  onClearDates?: () => void;
 }
 
-export const DiscoverySearch = ({ onSearch, availableCategories = [], hideTypes = false }: DiscoverySearchProps) => {
-  const [q, setQ] = useState('');
-  const [selectedTypes, setSelectedTypes] = useState<DiscoveryType[]>([]);
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+export const DiscoverySearch = ({ onSearch, value, availableCategories = [], hideTypes = false, dateError, onClear, onClearDates }: DiscoverySearchProps) => {
+  const q = value.q || '';
+  const selectedTypes = value.types || [];
+  const selectedCategories = value.categories || [];
 
   const types: { label: string; value: DiscoveryType }[] = [
     { label: 'Eventos', value: 'evento' },
@@ -30,16 +36,14 @@ export const DiscoverySearch = ({ onSearch, availableCategories = [], hideTypes 
     const next = selectedTypes.includes(type)
       ? selectedTypes.filter((t) => t !== type)
       : [...selectedTypes, type];
-    setSelectedTypes(next);
-    onSearch({ q, types: next, categories: selectedCategories });
+    onSearch({ ...value, q, types: next, categories: selectedCategories });
   };
 
   const toggleCategory = (cat: string) => {
     const next = selectedCategories.includes(cat)
       ? selectedCategories.filter((c) => c !== cat)
       : [...selectedCategories, cat];
-    setSelectedCategories(next);
-    onSearch({ q, types: selectedTypes, categories: next });
+    onSearch({ ...value, q, types: selectedTypes, categories: next });
   };
 
   return (
@@ -54,11 +58,15 @@ export const DiscoverySearch = ({ onSearch, availableCategories = [], hideTypes 
           accessibilityHint="Filtra la lista de descubrimiento mientras escribes"
           returnKeyType="search"
           onChangeText={(text) => {
-            setQ(text);
-            onSearch({ q: text, types: selectedTypes, categories: selectedCategories });
+            onSearch({ ...value, q: text, types: selectedTypes, categories: selectedCategories });
           }}
         />
+        {(q || selectedCategories.length > 0 || selectedTypes.length > 0 || value.from || value.to) && <Pressable
+          accessibilityRole="button" accessibilityLabel="Limpiar filtros" onPress={onClear || (() => onSearch({}))}>
+          <Text style={styles.chipTextActive}>Limpiar filtros</Text>
+        </Pressable>}
       </View>
+      <ContentDateRange from={value.from} to={value.to} error={dateError} onClear={onClearDates || (() => onSearch({ ...value, from: undefined, to: undefined }))} />
 
       {!hideTypes && (
         <View style={styles.filterRow}>
