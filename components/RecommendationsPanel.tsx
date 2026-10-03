@@ -1,7 +1,10 @@
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useRecommendationsQuery } from './transportQueries';
 import type { CriolloRecommendation, RecommendationType } from './transportTypes';
+import { useContentActions } from './useContentActions';
+import { contentActionTarget, safeExternalUrl } from './contentActions';
+import { FeedEmptyState, FeedStatus } from './FeedStatus';
 
 const TYPE_META: Record<
   RecommendationType,
@@ -15,20 +18,12 @@ const TYPE_META: Record<
 
 function RecommendationCard({ item }: { item: CriolloRecommendation }) {
   const meta = TYPE_META[item.type] ?? TYPE_META.service;
-
-  const handlePress = () => {
-    const href = item.actionHref;
-    if (href.startsWith('http')) {
-      Linking.openURL(href).catch(() => null);
-    }
-  };
+  const actions = useContentActions();
 
   return (
     <View
       style={[styles.card, { borderLeftColor: meta.color }]}
-      accessible
-      accessibilityRole="text"
-      accessibilityLabel={`Recomendación de ${meta.label}${item.priority === 'high' ? ' (Alta prioridad)' : ''}: ${item.title}. ${item.message}`}>
+      accessibilityLabel={`Recomendación de ${meta.label}`}>
       <View style={styles.cardTop} importantForAccessibility="no-hide-descendants">
         <View style={[styles.typeBadge, { backgroundColor: meta.bg }]}>
           <Text style={[styles.typeIcon]}>{meta.icon}</Text>
@@ -51,10 +46,10 @@ function RecommendationCard({ item }: { item: CriolloRecommendation }) {
           ))}
         </View>
       )}
-      {item.actionHref.startsWith('http') && (
+      {(contentActionTarget(item.actionHref) || safeExternalUrl(item.actionHref)) && (
         <Pressable
           style={styles.actionButton}
-          onPress={handlePress}
+          onPress={() => actions.navigate(item.actionHref)}
           accessibilityRole="link"
           accessibilityLabel={item.actionLabel}>
           <Text style={styles.actionButtonText}>{item.actionLabel} →</Text>
@@ -65,16 +60,18 @@ function RecommendationCard({ item }: { item: CriolloRecommendation }) {
 }
 
 export function RecommendationsPanel() {
-  const { data, isLoading, isError } = useRecommendationsQuery({ limit: 4 });
+  const query = useRecommendationsQuery({ limit: 4 });
+  const { data, isLoading, isError } = query;
 
-  // Silently skip if still loading or errored — don't block the main feed
-  if (isLoading || isError || !data) return null;
+  if (isLoading || !data) return <FeedEmptyState isLoading={isLoading} isError={isError} isFetching={query.isFetching}
+    onRetry={() => query.refetch()} title="No hay sugerencias disponibles." message="Vuelve a comprobar más tarde." />;
 
   const visible = data.data.filter(
     (r) => r.priority === 'high' || r.priority === 'medium',
   );
 
-  if (visible.length === 0) return null;
+  if (visible.length === 0) return isError || data.clientCache?.networkError || data.stale || data.metadata?.stale || data.metadata?.complete === false
+    ? <FeedStatus data={data} dataUpdatedAt={query.dataUpdatedAt} isError={isError} isFetching={query.isFetching} onRetry={() => query.refetch()} /> : null;
 
   return (
     <View
@@ -82,8 +79,9 @@ export function RecommendationsPanel() {
       accessibilityLabel="Panel de sugerencias para Caguas">
       <View style={styles.header}>
         <Text style={styles.headerTitle}>🍍 Sugerencias para ti</Text>
-        <Text style={styles.headerCount}>{visible.length} activas</Text>
+        <Text style={styles.headerCount}>{visible.length} sugerencias</Text>
       </View>
+      <FeedStatus data={data} dataUpdatedAt={query.dataUpdatedAt} isError={isError} isFetching={query.isFetching} onRetry={() => query.refetch()} />
       {visible.map((item) => (
         <RecommendationCard key={item.id} item={item} />
       ))}

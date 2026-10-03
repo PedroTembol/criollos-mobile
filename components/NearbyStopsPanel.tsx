@@ -1,14 +1,18 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { ScrollView, StyleSheet, Text, View, Pressable } from 'react-native';
 import { NearbyStop, NearbyStopRoute } from './transportTypes';
+import { createContentActionRunner } from './contentActions';
 
 interface Props {
   stops?: NearbyStop[];
   onStopPress?: (stop: NearbyStop) => void;
   isLoading?: boolean;
+  isError?: boolean;
+  onRetry?: () => unknown;
 }
 
-export function NearbyStopsPanel({ stops, onStopPress, isLoading }: Props) {
+export function NearbyStopsPanel({ stops, onStopPress, isLoading, isError, onRetry }: Props) {
+  const run = useRef(createContentActionRunner());
   if (isLoading) {
     return (
       <View style={styles.container}>
@@ -16,6 +20,13 @@ export function NearbyStopsPanel({ stops, onStopPress, isLoading }: Props) {
       </View>
     );
   }
+
+  if (isError && !stops?.length) return <View style={styles.container} accessibilityLiveRegion="polite">
+    <Text style={styles.loadingText}>No pudimos consultar las paradas cercanas.</Text>
+    {onRetry && <Pressable onPress={() => { void run.current(onRetry); }} accessibilityRole="button" accessibilityLabel="Reintentar paradas cercanas">
+      <Text style={styles.distanceText}>Reintentar</Text>
+    </Pressable>}
+  </View>;
 
   if (!stops || stops.length === 0) return null;
 
@@ -26,17 +37,19 @@ export function NearbyStopsPanel({ stops, onStopPress, isLoading }: Props) {
         <Text style={styles.subtitle}>{stops.length} encontradas</Text>
       </View>
 
-      <ScrollView 
-        horizontal 
+      <ScrollView
+        horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
         accessibilityLabel="Lista de paradas de trolley cercanas a tu ubicación"
       >
         {stops.map((stop) => (
-          <Pressable 
-            key={stop.markerId} 
+          <Pressable
+            key={stop.markerId}
             style={styles.stopCard}
-            onPress={() => onStopPress?.(stop)}
+            onPress={() => { void run.current(() => onStopPress?.(stop)); }}
+            disabled={!onStopPress}
+            accessibilityState={{ disabled: !onStopPress }}
             accessibilityRole="button"
             accessibilityLabel={`${stop.name}, a ${stop.distanceLabel}. Servida por ${stop.routeCount} rutas.`}
           >
@@ -47,8 +60,8 @@ export function NearbyStopsPanel({ stops, onStopPress, isLoading }: Props) {
 
             <View style={styles.routesContainer}>
               {stop.routes.slice(0, 3).map((route: NearbyStopRoute) => (
-                <View 
-                  key={route.routeId} 
+                <View
+                  key={route.routeId}
                   style={[styles.routeBadge, { backgroundColor: route.routeColor || '#94a3b8' }]}
                   accessibilityLabel={`Ruta ${route.routeName}`}
                 >

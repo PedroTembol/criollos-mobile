@@ -26,10 +26,12 @@ export function TrackingDashboard({ snapshot, onRoutePress }: Props) {
   };
 
   const serviceStatusLabels: Record<string, string> = {
-    healthy: 'Sistema Saludable',
-    degraded: 'Servicio Degradado',
-    offline: 'Sistema Fuera de Línea',
+    healthy: 'Señales recientes',
+    degraded: 'Señales parciales o anteriores',
+    offline: 'Sin señales recientes',
   };
+  const noRecentSignals = summary.liveVehicles === 0;
+  const serviceStatusLabel = noRecentSignals ? 'Sin señales recientes' : serviceStatusLabels[summary.serviceHealth.status];
 
   return (
     <View style={styles.container}>
@@ -37,11 +39,12 @@ export function TrackingDashboard({ snapshot, onRoutePress }: Props) {
         style={styles.serviceHealth}
         accessible
         accessibilityRole="summary"
-        accessibilityLabel={`Estado del tracking: ${serviceStatusLabels[summary.serviceHealth.status] ?? 'estado desconocido'}, ${summary.serviceHealth.liveCoveragePercent}% de cobertura en vivo.`}>
-        <View style={[styles.statusIndicator, { backgroundColor: serviceStatusColors[summary.serviceHealth.status] || '#94a3b8' }]} />
-        <Text style={styles.serviceStatusText}>{serviceStatusLabels[summary.serviceHealth.status]}</Text>
+        accessibilityLabel={`Estado de señales: ${serviceStatusLabel ?? 'estado desconocido'}, ${summary.serviceHealth.liveCoveragePercent}% de cobertura en vivo. Esto no confirma si el servicio está operando.`}>
+        <View style={[styles.statusIndicator, { backgroundColor: noRecentSignals ? '#94a3b8' : serviceStatusColors[summary.serviceHealth.status] || '#94a3b8' }]} />
+        <Text style={styles.serviceStatusText}>{serviceStatusLabel}</Text>
         <Text style={styles.coverageText}>{summary.serviceHealth.liveCoveragePercent}% en vivo</Text>
       </View>
+      {noRecentSignals && <Text style={styles.nextStop}>La falta de señales no confirma si el servicio está operando.</Text>}
 
       <View
         style={styles.header}
@@ -72,11 +75,10 @@ export function TrackingDashboard({ snapshot, onRoutePress }: Props) {
       >
         {summary.routes.map((route: TrackingRouteSummary) => {
           const routeLabel = route.routeName || `Ruta ${route.routeId}`;
-          const nextStopLabel = route.nextStops.length > 0
+          const routeHasRecentSignal = route.liveVehicles > 0;
+          const nextStopLabel = routeHasRecentSignal && route.nextStops.length > 0
             ? `Próxima parada ${route.nextStops[0]}`
-            : route.healthLabel === 'offline'
-              ? 'Sin servicio'
-              : 'Buscando señal';
+            : 'Sin señal reciente';
 
           return (
           <Pressable 
@@ -84,7 +86,7 @@ export function TrackingDashboard({ snapshot, onRoutePress }: Props) {
             style={[styles.routeCard, { borderLeftColor: route.routeColor || '#ccc' }]}
             onPress={() => onRoutePress?.(route.routeId)}
             accessibilityRole="button"
-            accessibilityLabel={`${routeLabel}. Estado ${route.healthLabel}. ${route.liveVehicles} vehículos en vivo, ${route.movingVehicles} moviéndose. ${nextStopLabel}.`}
+            accessibilityLabel={`${routeLabel}. ${route.liveVehicles} vehículos con señal reciente, ${route.movingVehicles} moviéndose según la última consulta. ${nextStopLabel}.`}
           >
             <View style={styles.routeHeader}>
               <Text style={styles.routeName} numberOfLines={1}>{route.routeName || `Ruta ${route.routeId}`}</Text>
@@ -95,13 +97,13 @@ export function TrackingDashboard({ snapshot, onRoutePress }: Props) {
                 {route.liveVehicles} live · {route.movingVehicles} mov
               </Text>
             </View>
-            {route.nextStops.length > 0 ? (
+            {routeHasRecentSignal && route.nextStops.length > 0 ? (
               <Text style={styles.nextStop} numberOfLines={1}>
                 Próxima: {route.nextStops[0]}
               </Text>
             ) : (
               <Text style={styles.nextStop} numberOfLines={1}>
-                {route.healthLabel === 'offline' ? 'Sin servicio' : 'Buscando señal...'}
+                Sin señal reciente
               </Text>
             )}
           </Pressable>

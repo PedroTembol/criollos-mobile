@@ -1,32 +1,37 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   Image,
-  Linking,
   Pressable,
-  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
 
-import { DiscoverySearch } from '@/components/DiscoverySearch';
+import { FeedEmptyState, FeedStatus } from '@/components/FeedStatus';
+import { useContentFilters } from '@/components/useContentFilters';
+import { useContentActions } from '@/components/useContentActions';
+import type { DiscoveryFeedItem } from '@/components/transportTypes';
+import { buildEventCalendarUrl } from '@/components/contentCalendar';
+
+import { DiscoverySearch, type DiscoverySearchFilters } from '@/components/DiscoverySearch';
 import { DiscoverySummaryPanel } from '@/components/DiscoverySummaryPanel';
+import { RecommendationsPanel } from '@/components/RecommendationsPanel';
 import { useDiscoveryQuery } from '@/components/transportQueries';
 
 export function DiscoveryFeed() {
-  const router = useRouter();
-  const [filters, setFilters] = useState<{ q?: string; type?: string[]; category?: string[] }>({});
-  const discoveryQuery = useDiscoveryQuery(filters);
+  const actions = useContentActions();
+  const { filters, queryFilters, setFilters, clearFilters, clearDateFilters, dateError, hasValidDates } = useContentFilters();
+  const discoveryQuery = useDiscoveryQuery(queryFilters, hasValidDates);
 
-  const handleDiscoverySearch = useCallback((nextFilters: { q?: string; types?: string[]; categories?: string[] }) => {
+  const handleDiscoverySearch = useCallback((nextFilters: DiscoverySearchFilters) => {
     setFilters({
       q: nextFilters.q,
       type: nextFilters.types,
       category: nextFilters.categories,
+      from: nextFilters.from,
+      to: nextFilters.to,
     });
   }, []);
 
@@ -42,59 +47,21 @@ export function DiscoveryFeed() {
     [discoveryQuery.data?.summary?.categories],
   );
 
-  const handleShare = useCallback((item: any) => {
-    const message = `${item.title}\n${item.subtitle}\n\n${item.description}\n\nVer más en: ${item.link}`;
-    Share.share({
-      message,
-      url: item.link || undefined,
-      title: item.title,
-    });
-  }, []);
-
-  const handleAddToCalendar = useCallback((item: any) => {
-    if (!item.eventDate) return;
-
-    const startDate = new Date(item.eventDate);
-    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000); // +2 hours default
-    
-    const format = (date: Date) => date.toISOString().replace(/-|:|\.\d+/g, '');
-    const dates = `${format(startDate)}/${format(endDate)}`;
-
-    const url = new URL('https://calendar.google.com/calendar/render');
-    url.searchParams.set('action', 'TEMPLATE');
-    url.searchParams.set('text', item.title);
-    url.searchParams.set('dates', dates);
-    url.searchParams.set('details', `${item.description}\n\nFuente: ${item.link}`);
-    url.searchParams.set('location', item.subtitle);
-
-    Linking.openURL(url.toString());
-  }, []);
-
-  const handleViewInMap = useCallback((item: any) => {
-    // Si el API ya devolvió coordenadas enriquecidas (futura mejora del scraper/resolver)
-    if (item.lat && item.lng) {
-      router.push({
-        pathname: '/',
-        params: { lat: item.lat, lng: item.lng }
-      });
-    } else {
-      // Si no hay coordenadas, buscamos por nombre del lugar (subtitle o title)
-      router.push({
-        pathname: '/',
-        params: { q: item.subtitle || item.title }
-      });
-    }
-  }, [router]);
+  const handleShare = (item: DiscoveryFeedItem) => actions.share({ title: item.title, location: item.subtitle, description: item.description, sourceUrl: item.link });
+  const calendarUrl = (item: DiscoveryFeedItem) => buildEventCalendarUrl({ title: item.title, date: item.eventDate, description: item.description, location: item.subtitle, sourceUrl: item.link });
+  const handleAddToCalendar = (item: DiscoveryFeedItem) => actions.open(calendarUrl(item));
+  const handleViewInMap = (item: DiscoveryFeedItem) => actions.map({ title: item.title, location: item.subtitle, lat: item.lat, lng: item.lng });
 
   return (
     <FlatList
-      data={discoveryQuery.data?.data ?? []}
+      data={hasValidDates ? discoveryQuery.data?.data ?? [] : []}
       keyExtractor={(item) => item.id}
       contentContainerStyle={styles.listContent}
-      onRefresh={discoveryQuery.refetch}
-      refreshing={discoveryQuery.isFetching}
+      onRefresh={() => { if (hasValidDates && !discoveryQuery.isFetching) void discoveryQuery.refetch(); }}
+      refreshing={discoveryQuery.isFetching && !discoveryQuery.isLoading}
       ListHeaderComponent={
         <View style={styles.headerWrap}>
+          <RecommendationsPanel />
           <View style={styles.heroCard}>
             <Text style={styles.heroEyebrow}>Agenda criolla</Text>
             <Text style={styles.heroTitle}>Descubre qué hacer hoy en Caguas</Text>
@@ -102,34 +69,21 @@ export function DiscoveryFeed() {
               Eventos, experiencias y recomendaciones locales en una pestaña propia, sin mezclarse con la navegación de transporte.
             </Text>
           </View>
-          <DiscoverySummaryPanel 
-            summary={discoveryQuery.data?.summary} 
-            onSelectCategory={handleSelectCategory} 
+          <FeedStatus data={hasValidDates ? discoveryQuery.data : undefined} dataUpdatedAt={discoveryQuery.dataUpdatedAt} isError={discoveryQuery.isError} isFetching={discoveryQuery.isFetching} onRetry={() => discoveryQuery.refetch()} />
+          <DiscoverySummaryPanel
+            summary={hasValidDates ? discoveryQuery.data?.summary : undefined}
+            onSelectCategory={handleSelectCategory}
           />
-          <DiscoverySearch onSearch={handleDiscoverySearch} availableCategories={availableCategories} />
+          <DiscoverySearch value={{ q: filters.q, types: filters.type, categories: filters.category, from: filters.from, to: filters.to }} dateError={dateError} onClear={clearFilters} onClearDates={clearDateFilters} onSearch={handleDiscoverySearch} availableCategories={availableCategories} />
         </View>
       }
-      ListEmptyComponent={
-        discoveryQuery.isLoading ? (
-          <ActivityIndicator style={styles.loadingIndicator} />
-        ) : (
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyTitle}>No encontramos planes con esos filtros.</Text>
-            <Text style={styles.emptyText}>Prueba otro texto o limpia la búsqueda para volver al feed completo.</Text>
-            <Pressable
-              style={styles.linkButton}
-              onPress={() => setFilters({})}
-              accessibilityRole="button"
-              accessibilityLabel="Limpiar filtros de descubrimiento">
-              <Text style={styles.linkText}>Limpiar filtros</Text>
-            </Pressable>
-          </View>
-        )
-      }
+      ListEmptyComponent={dateError ? <Text style={styles.emptyText}>Limpia las fechas del enlace para consultar los planes.</Text> : <FeedEmptyState isLoading={discoveryQuery.isLoading || !hasValidDates} isError={discoveryQuery.isError || Boolean(discoveryQuery.data?.clientCache?.networkError || discoveryQuery.data?.stale || discoveryQuery.data?.metadata?.stale || discoveryQuery.data?.metadata?.complete === false)} isFetching={discoveryQuery.isFetching}
+        onRetry={() => discoveryQuery.refetch()} onClear={clearFilters} title="No encontramos planes con esos filtros."
+        message="Prueba otro texto o limpia los filtros para volver al contenido completo." />}
       renderItem={({ item }) => (
         <View style={styles.card}>
           <Pressable
-            onPress={() => item.link && Linking.openURL(item.link)}
+            onPress={() => actions.open(item.link)}
             disabled={!item.link}
             accessibilityRole={item.link ? 'link' : 'text'}
             accessibilityState={{ disabled: !item.link }}
@@ -157,7 +111,7 @@ export function DiscoveryFeed() {
           </Pressable>
 
           <View style={styles.cardActions}>
-            <Pressable 
+            <Pressable
               onPress={() => handleViewInMap(item)}
               style={styles.actionButton}
               accessibilityRole="button"
@@ -166,7 +120,7 @@ export function DiscoveryFeed() {
               <Text style={[styles.actionButtonText, { color: '#1d4ed8' }]}>Mapa</Text>
             </Pressable>
 
-            <Pressable 
+            <Pressable
               onPress={() => handleShare(item)}
               style={styles.actionButton}
               accessibilityRole="button"
@@ -175,8 +129,8 @@ export function DiscoveryFeed() {
               <Text style={styles.actionButtonText}>Compartir</Text>
             </Pressable>
 
-            {item.type === 'evento' && item.eventDate && (
-              <Pressable 
+            {item.type === 'evento' && calendarUrl(item) && (
+              <Pressable
                 onPress={() => handleAddToCalendar(item)}
                 style={styles.actionButton}
                 accessibilityRole="button"

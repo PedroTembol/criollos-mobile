@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -12,15 +12,22 @@ import {
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { useSearchQuery } from './transportQueries';
 import type { SearchResult } from './transportTypes';
+import { FeedEmptyState } from './FeedStatus';
+import { createContentActionRunner } from './contentActions';
 
 interface SearchOverlayProps {
   onResultPress: (result: SearchResult) => void;
   onClose?: () => void;
+  initialQuery?: string;
 }
 
-export const SearchOverlay = ({ onResultPress, onClose }: SearchOverlayProps) => {
-  const [q, setQ] = useState('');
-  const searchQuery = useSearchQuery(q, { limit: 10 });
+export const SearchOverlay = ({ onResultPress, onClose, initialQuery = '' }: SearchOverlayProps) => {
+  const [q, setQ] = useState(initialQuery);
+  const [queryText, setQueryText] = useState(q);
+  const selection = useRef(createContentActionRunner());
+  useEffect(() => setQ(initialQuery), [initialQuery]);
+  useEffect(() => { const timer = setTimeout(() => setQueryText(q.trim()), 250); return () => clearTimeout(timer); }, [q]);
+  const searchQuery = useSearchQuery(queryText, { limit: 10 });
 
   const results = searchQuery.data?.results ?? [];
 
@@ -60,25 +67,31 @@ export const SearchOverlay = ({ onResultPress, onClose }: SearchOverlayProps) =>
           onChangeText={setQ}
         />
         {q.length > 0 && (
-          <Pressable onPress={() => setQ('')} accessibilityLabel="Limpiar búsqueda">
+          <Pressable onPress={() => setQ('')} accessibilityRole="button" accessibilityLabel="Limpiar búsqueda">
             <FontAwesome name="times-circle" size={18} color="#94a3b8" />
           </Pressable>
         )}
+        {onClose && <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="Cerrar búsqueda" style={{ marginLeft: 12 }}>
+          <FontAwesome name="times" size={18} color="#64748b" />
+        </Pressable>}
       </View>
 
-      {q.length >= 2 ? (
+      {q.trim().length >= 2 ? (
         <ScrollView style={styles.resultsList} keyboardShouldPersistTaps="handled">
-          {searchQuery.isLoading ? (
+          {searchQuery.isLoading || queryText !== q.trim() ? (
             <View style={styles.center}>
               <ActivityIndicator color="#2563eb" />
               <Text style={styles.metaText}>Buscando en Caguas...</Text>
             </View>
+          ) : searchQuery.isError ? (
+            <FeedEmptyState isLoading={false} isError isFetching={searchQuery.isFetching} onRetry={() => searchQuery.refetch()}
+              title="" message="" />
           ) : results.length > 0 ? (
             results.map((result, idx) => (
               <Pressable
                 key={`${result.type}-${result.id}-${idx}`}
                 style={styles.resultItem}
-                onPress={() => onResultPress(result)}
+                onPress={() => { void selection.current(() => onResultPress(result)); }}
                 accessibilityRole="button"
                 accessibilityLabel={`${getTypeLabel(result.type)}: ${result.title}`}>
                 <View style={styles.resultIconBox}>

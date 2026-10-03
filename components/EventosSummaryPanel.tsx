@@ -1,14 +1,15 @@
 import React from 'react';
 import { ScrollView, View, Text, StyleSheet, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import type { EventosSummary } from './transportTypes';
+import type { EventosFeaturedPlan, EventosSummary } from './transportTypes';
 
 interface EventosSummaryPanelProps {
   summary?: EventosSummary;
   onSelectCategory?: (category: string) => void;
+  onSelectPlan?: (plan: EventosFeaturedPlan) => void;
 }
 
-export function EventosSummaryPanel({ summary, onSelectCategory }: EventosSummaryPanelProps) {
+export function EventosSummaryPanel({ summary, onSelectCategory, onSelectPlan }: EventosSummaryPanelProps) {
   if (!summary) return null;
 
   const { alerts, featuredPlans, categories } = summary;
@@ -22,10 +23,10 @@ export function EventosSummaryPanel({ summary, onSelectCategory }: EventosSummar
             {alerts.map((alert) => (
               <View key={alert.id} style={[styles.alertCard, alert.severity === 'warning' && styles.alertWarning]}>
                 <View style={styles.alertHeader}>
-                  <Ionicons 
-                    name={alert.scope === 'weekend' ? "calendar" : "flash"} 
-                    size={16} 
-                    color={alert.severity === 'warning' ? '#92400e' : '#1e40af'} 
+                  <Ionicons
+                    name={alert.scope === 'weekend' ? "calendar" : "flash"}
+                    size={16}
+                    color={alert.severity === 'warning' ? '#92400e' : '#1e40af'}
                   />
                   <Text style={[styles.alertTitle, alert.severity === 'warning' && styles.alertTitleWarning]}>
                     {alert.title}
@@ -44,14 +45,16 @@ export function EventosSummaryPanel({ summary, onSelectCategory }: EventosSummar
           <Text style={styles.sectionSubtitle}>Planes destacados</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
             {featuredPlans.map((plan) => (
-              <View key={plan.id} style={styles.planCard}>
+              <Pressable key={plan.id} style={styles.planCard} onPress={() => onSelectPlan?.(plan)}
+                disabled={!onSelectPlan} accessibilityRole="button" accessibilityState={{ disabled: !onSelectPlan }}
+                accessibilityLabel={`Ver ${plan.primaryEventTitle}`}>
                 <Text style={styles.planEyebrow}>{plan.eyebrow}</Text>
                 <Text style={styles.planTitle} numberOfLines={1}>{plan.title}</Text>
                 <Text style={styles.planBody} numberOfLines={2}>{plan.body}</Text>
                 <View style={styles.planFooter}>
                   <Text style={styles.planMeta} numberOfLines={1}>{plan.meta}</Text>
                 </View>
-              </View>
+              </Pressable>
             ))}
           </ScrollView>
         </View>

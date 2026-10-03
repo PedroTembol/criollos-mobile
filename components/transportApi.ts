@@ -1,5 +1,6 @@
-import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createTransportClient } from './transportClient';
+import { DEFAULT_API_BASE_URL, positiveId, validEtaCoordinates } from './transportContracts';
 
 import type {
   BootstrapResponse,
@@ -23,100 +24,16 @@ import type {
   TrackingFilters,
 } from './transportTypes';
 
-const DEFAULT_BASE_URL =
-  Platform.OS === 'android' ? 'http://10.0.2.2:3000/api/v1' : 'https://criollos.app/api/v1';
-
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_BASE_URL;
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 const API_KEY = process.env.EXPO_PUBLIC_API_KEY;
-
-type RequestOptions = {
-  method?: 'GET' | 'POST';
-  query?: Record<string, string | number | undefined>;
-  body?: unknown;
-};
-
-function buildUrl(path: string, query?: RequestOptions['query'], baseUrl?: string) {
-  const url = new URL(path, baseUrl ?? API_BASE_URL);
-  if (query) {
-    Object.entries(query).forEach(([key, value]) => {
-      if (value === undefined || value === null || value === '') return;
-      url.searchParams.set(key, String(value));
-    });
-  }
-  return url.toString();
-}
-
-async function request<T>(path: string, options: RequestOptions & { baseUrl?: string } = {}) {
-  const url = buildUrl(path, options.query, options.baseUrl);
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-  };
-
-  // Ngrok requiere este header para evitar la página de advertencia
-  if (url.includes('ngrok-free.app') || url.includes('ngrok.io')) {
-    headers['ngrok-skip-browser-warning'] = 'true';
-  }
-
-  if (API_KEY) {
-    headers['x-api-key'] = API_KEY;
-  }
-  if (options.body) headers['Content-Type'] = 'application/json';
-
-  const response = await fetch(url, {
-    method: options.method ?? 'GET',
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    if (response.status === 401 || response.status === 403) {
-      const errorMsg = API_KEY
-        ? `API error ${response.status}: ${text || 'Invalid API key'}`
-        : `API error ${response.status}: ${text || 'Missing API key'}`;
-      throw new Error(errorMsg);
-    }
-    throw new Error(`API error ${response.status}: ${text}`);
-  }
-
-  return (await response.json()) as T;
-}
-
-/**
- * Intenta obtener datos de la red y guarda una copia en AsyncStorage.
- * Si la red falla, intenta recuperar la última copia exitosa del cache local.
- */
-async function persistentRequest<T>(
-  cacheKey: string,
-  path: string,
-  options: RequestOptions & { baseUrl?: string } = {}
-): Promise<T> {
-  const fullCacheKey = `criollos.cache.${cacheKey}`;
-
-  try {
-    const data = await request<T>(path, options);
-    // Guardar en cache asincrónicamente
-    AsyncStorage.setItem(fullCacheKey, JSON.stringify(data)).catch(() => {
-      /* ignore storage errors */
-    });
-    return data;
-  } catch (error) {
-    console.warn(`Red fallida para ${path}, intentando cache local...`, error);
-    const cached = await AsyncStorage.getItem(fullCacheKey).catch(() => null);
-    if (cached) {
-      try {
-        return JSON.parse(cached) as T;
-      } catch (parseError) {
-        console.error(`Error al parsear cache para ${cacheKey}`, parseError);
-      }
-    }
-    // Si no hay cache o falla, re-lanzar el error original de red
-    throw error;
-  }
-}
+const { request, persistentRequest } = createTransportClient({
+  baseUrl: API_BASE_URL,
+  apiKey: API_KEY,
+  storage: AsyncStorage,
+});
 
 export function fetchBootstrap(idMarker?: number, baseUrl?: string) {
-  return persistentRequest<BootstrapResponse>('bootstrap', '/bootstrap', {
+  return persistentRequest<BootstrapResponse>('/bootstrap', {
     query: idMarker ? { idMarker } : undefined,
     baseUrl,
   });
@@ -130,11 +47,11 @@ export function fetchPositions(idMarker?: number, baseUrl?: string) {
 }
 
 export function fetchRoutes(baseUrl?: string) {
-  return persistentRequest<RoutesResponse>('routes', '/routes', { baseUrl });
+  return persistentRequest<RoutesResponse>('/routes', { baseUrl });
 }
 
 export function fetchStops(baseUrl?: string) {
-  return persistentRequest<StopsResponse>('stops', '/stops', { baseUrl });
+  return persistentRequest<StopsResponse>('/stops', { baseUrl });
 }
 
 export function fetchTracking(filters?: TrackingFilters, baseUrl?: string) {
@@ -148,9 +65,13 @@ export function fetchEta(
   options: { latlngs?: string; assetId?: number; stopId?: number; time?: number },
   baseUrl?: string
 ) {
+  const latlngs = validEtaCoordinates(options.latlngs) ? options.latlngs : undefined;
+  if (!latlngs && !(positiveId(options.assetId) && positiveId(options.stopId))) {
+    return Promise.reject(new Error('Se necesita un vehículo y una parada válidos para calcular la llegada.'));
+  }
   return request<EtaResponse>('/eta', {
     query: {
-      latlngs: options.latlngs,
+      latlngs,
       assetId: options.assetId,
       stopId: options.stopId,
       time: options.time,
@@ -176,8 +97,7 @@ export function fetchGastronomia(baseUrl?: string, filters?: { q?: string; categ
 
   // Solo cachear si no hay filtros de búsqueda (feed general/por categoría)
   if (!filters?.q) {
-    const cacheKey = `gastronomia.${filters?.category || 'all'}`;
-    return persistentRequest<GastronomiaResponse>(cacheKey, '/gastronomia', {
+    return persistentRequest<GastronomiaResponse>('/gastronomia', {
       baseUrl,
       query,
     });
@@ -200,8 +120,7 @@ export function fetchEventos(baseUrl?: string, filters?: { q?: string; category?
 
   // Solo cachear si no hay filtros de búsqueda o fechas específicas (agenda general)
   if (!filters?.q && !filters?.from && !filters?.to) {
-    const cacheKey = `eventos.${filters?.category || 'all'}`;
-    return persistentRequest<EventosResponse>(cacheKey, '/eventos', {
+    return persistentRequest<EventosResponse>('/eventos', {
       baseUrl,
       query,
     });
@@ -227,9 +146,8 @@ export function fetchDiscovery(baseUrl?: string, filters?: DiscoveryFilters) {
   };
 
   // Solo cachear si no hay filtros de búsqueda o proximidad (feed general)
-  if (!filters?.q && !filters?.lat && !filters?.lng) {
-    const cacheKey = `discovery.${filters?.type || 'all'}.${filters?.category || 'all'}`;
-    return persistentRequest<DiscoveryResponse>(cacheKey, '/discovery', {
+  if (!filters?.q && filters?.lat === undefined && filters?.lng === undefined) {
+    return persistentRequest<DiscoveryResponse>('/discovery', {
       baseUrl,
       query,
     });
@@ -254,7 +172,7 @@ export function fetchRecommendations(
 
   // Cachear recomendaciones generales
   if (!filters?.type) {
-    return persistentRequest<RecommendationsFeed>('recommendations', '/recommendations', {
+    return persistentRequest<RecommendationsFeed>('/recommendations', {
       baseUrl,
       query,
     });

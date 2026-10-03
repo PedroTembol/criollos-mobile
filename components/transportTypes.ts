@@ -1,3 +1,30 @@
+export type ClientCacheMetadata = {
+  source: 'network' | 'local-cache';
+  /** Original successful network retrieval, never replaced on a cache fallback. */
+  cachedAt: string;
+  ageMs: number;
+  networkError?: string;
+};
+
+export type ResponseFreshness = {
+  clientCache?: ClientCacheMetadata;
+  fetchedAt?: string;
+  stale?: boolean;
+  staleReason?: string | null;
+  warning?: string | null;
+  metadata?: {
+    fetchedAt?: string | null;
+    lastAttemptAt?: string | null;
+    lastSuccessAt?: string | null;
+    stale?: boolean;
+    staleReason?: string | null;
+    complete?: boolean;
+    pagesFetched?: number;
+    pagesDiscovered?: number;
+    sourceUrl?: string | null;
+  };
+};
+
 export type Asset = {
   id: number;
   groupId?: number;
@@ -57,7 +84,7 @@ export type Position = {
   lng?: number | null;
 };
 
-export type BootstrapResponse = {
+export type BootstrapResponse = ResponseFreshness & {
   assets?: Asset[];
   markers?: Marker[];
   routes?: Route[];
@@ -68,17 +95,17 @@ export type BootstrapResponse = {
   fetchedAt?: string;
 };
 
-export type PositionsResponse = {
+export type PositionsResponse = ResponseFreshness & {
   positions?: Position[];
   fetchedAt?: string;
 };
 
-export type RoutesResponse = {
+export type RoutesResponse = ResponseFreshness & {
   routes?: Route[];
   fetchedAt?: string;
 };
 
-export type StopsResponse = {
+export type StopsResponse = ResponseFreshness & {
   stops?: RoutePoint[];
   fetchedAt?: string;
 };
@@ -224,7 +251,7 @@ export type NearbyStop = {
   routes: NearbyStopRoute[];
 };
 
-export type NearbyStopsResponse = {
+export type NearbyStopsResponse = ResponseFreshness & {
   status: string;
   source: string;
   fetchedAt: string;
@@ -257,7 +284,7 @@ export type NearbyVehicle = {
   lastReportedAt: string;
 };
 
-export type NearbyVehiclesResponse = {
+export type NearbyVehiclesResponse = ResponseFreshness & {
   generatedAt: string;
   count: number;
   summary: {
@@ -270,7 +297,7 @@ export type NearbyVehiclesResponse = {
   data: NearbyVehicle[];
 };
 
-export type TrackingSnapshot = {
+export type TrackingSnapshot = ResponseFreshness & {
   vehicles: TrackingVehicleSnapshot[];
   fetchedAt: string;
   summary: TrackingSummary;
@@ -378,7 +405,7 @@ export type GastronomiaSummary = {
   alerts?: GastronomiaSummaryAlert[];
 };
 
-export type GastronomiaResponse = {
+export type GastronomiaResponse = ResponseFreshness & {
   status: 'success' | 'error';
   source: 'live' | 'cache';
   count: number;
@@ -438,7 +465,7 @@ export type EventosSummary = {
   alerts?: EventosSummaryAlert[];
 };
 
-export type EventosResponse = {
+export type EventosResponse = ResponseFreshness & {
   status: 'success' | 'error';
   source: 'live' | 'cache';
   count: number;
@@ -490,7 +517,7 @@ export type DiscoverySummary = {
   alerts?: DiscoverySummaryAlert[];
 };
 
-export type DiscoveryResponse = {
+export type DiscoveryResponse = ResponseFreshness & {
   status: 'success' | 'error';
   source: 'live' | 'cache';
   count: number;
@@ -537,7 +564,7 @@ export type DiscoveryFilters = {
   radiusMeters?: number;
 };
 
-export type RecommendationsFeed = {
+export type RecommendationsFeed = ResponseFreshness & {
   generatedAt: string;
   count: number;
   summary: CriolloRecommendationsSummary;
@@ -550,7 +577,7 @@ export type RecommendationsFilters = {
 };
 
 export type SearchResult = {
-  type: 'route' | 'stop' | 'evento' | 'gastronomia';
+  type: 'route' | 'stop' | 'vehicle' | 'evento' | 'gastronomia';
   id: string;
   title: string;
   subtitle: string;
@@ -560,7 +587,7 @@ export type SearchResult = {
   metadata?: Record<string, any>;
 };
 
-export type SearchResponse = {
+export type SearchResponse = ResponseFreshness & {
   status: 'success' | 'error';
   query: string;
   count: number;
